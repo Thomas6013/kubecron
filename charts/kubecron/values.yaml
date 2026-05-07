@@ -2,6 +2,9 @@ image:
   repository: ghcr.io/thomas6013/kubecron
   tag: ""  # defaults to Chart.AppVersion
   pullPolicy: IfNotPresent
+  pullSecrets: []
+  # pullSecrets:
+  #   - ghcr-login-secret
 
 nameOverride: ""
 fullnameOverride: ""
