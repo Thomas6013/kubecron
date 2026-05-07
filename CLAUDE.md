@@ -114,7 +114,7 @@ See `.env.example`. Key variables:
 | `OIDC_CLIENT_ID` | _(empty)_ | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | _(empty)_ | OIDC client secret (store in K8s Secret) |
 | `OIDC_REDIRECT_URL` | _(empty)_ | `https://<host>/auth/callback` — must be HTTPS |
-| `OIDC_SESSION_KEY` | _(empty)_ | ≥32-char secret for session signing (store in K8s Secret) |
+| `OIDC_SESSION_KEY` | _(empty)_ | Any string ≥32 chars; SHA-256 derived internally (store in K8s Secret) |
 
 ---
 

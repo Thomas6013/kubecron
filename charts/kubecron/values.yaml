@@ -26,7 +26,7 @@ oidc:
   # If empty, clientSecret and sessionKey below are used to create a new Secret.
   existingSecret: ""
   clientSecret: ""
-  sessionKey: ""   # random string, min 32 chars
+  sessionKey: ""   # any string >= 32 chars; SHA-256 derived internally
 
 # Kubeconfigs — one file per cluster, mounted at /etc/kubecron/kubeconfigs
 kubeconfigs:

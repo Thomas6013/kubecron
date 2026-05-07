@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,10 +58,11 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 
 	var sessKey []byte
 	if cfg.SessionKey != "" {
-		sessKey, err = hex.DecodeString(cfg.SessionKey)
-		if err != nil || len(sessKey) < 32 {
-			return nil, fmt.Errorf("auth: OIDC_SESSION_KEY must be 64 hex chars (32 bytes)")
+		if len(cfg.SessionKey) < 32 {
+			return nil, fmt.Errorf("auth: OIDC_SESSION_KEY must be at least 32 characters")
 		}
+		derived := sha256.Sum256([]byte(cfg.SessionKey))
+		sessKey = derived[:]
 	} else {
 		sessKey = make([]byte, 32)
 		if _, err := rand.Read(sessKey); err != nil {
