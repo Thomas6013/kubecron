@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/thomas6013/kubecron/kubecron
+  repository: ghcr.io/thomas6013/kubecron
   tag: ""  # defaults to Chart.AppVersion
   pullPolicy: IfNotPresent
 
