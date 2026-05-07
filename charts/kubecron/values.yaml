@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/thomas6013/kubecron
-  tag: "main"  # defaults to Chart.AppVersion
+  repository: ghcr.io/thomas6013/kubecron/kubecron
+  tag: ""  # defaults to Chart.AppVersion
   pullPolicy: IfNotPresent
 
 nameOverride: ""
