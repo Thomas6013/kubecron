@@ -1,0 +1,102 @@
+image:
+  repository: ghcr.io/thomas6013/kubecron
+  tag: ""  # defaults to Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Core app config
+config:
+  port: 8080
+  # Days of run history (logs + metrics) to keep in SQLite
+  retentionDays: 7
+  metricsSampleInterval: 15
+
+# OIDC / SSO — set enabled: true to activate
+oidc:
+  enabled: false
+  issuerURL: ""
+  clientID: ""
+  redirectURL: ""  # must be https://<host>/auth/callback in production
+  # Reference an existing Secret that has keys: client-secret, session-key
+  # If empty, clientSecret and sessionKey below are used to create a new Secret.
+  existingSecret: ""
+  clientSecret: ""
+  sessionKey: ""   # random string, min 32 chars
+
+# Kubeconfigs — one file per cluster, mounted at /etc/kubecron/kubeconfigs
+kubeconfigs:
+  # Name of an existing Secret (Opaque) whose keys are cluster IDs
+  # and values are base64-encoded kubeconfigs.
+  # If set, the chart will NOT create a new Secret.
+  existingSecret: ""
+  # Inline kubeconfigs: key = clusterID, value = base64-encoded kubeconfig.
+  # Generate with: kubectl config view --minify --raw | base64 -w0
+  data: {}
+  # data:
+  #   prod-eu: <base64-kubeconfig>
+  #   staging-us: <base64-kubeconfig>
+
+# SQLite data volume
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 500Mi
+  accessMode: ReadWriteOnce
+  # Use an existing PVC instead of creating one
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  host: kubecron.example.com
+  tls: []
+  # tls:
+  #   - secretName: kubecron-tls
+  #     hosts:
+  #       - kubecron.example.com
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# Extra pod labels / annotations
+podLabels: {}
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

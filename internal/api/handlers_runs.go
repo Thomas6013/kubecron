@@ -1,0 +1,380 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// ── JSON ─────────────────────────────────────────────────────────────────────
+
+func (h *Handler) ListRuns(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("clusterID")
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	ctx := r.Context()
+
+	cj, err := h.store.GetCronJobByName(ctx, clusterID, ns, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to look up cronjob")
+		return
+	}
+	if cj == nil {
+		writeError(w, http.StatusNotFound, "cronjob not found")
+		return
+	}
+	runs, err := h.store.ListJobRuns(ctx, cj.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list runs")
+		return
+	}
+	writeJSON(w, http.StatusOK, runs)
+}
+
+type resourceSamplesResponse struct {
+	RunID   string      `json:"run_id"`
+	Samples interface{} `json:"samples"`
+}
+
+func (h *Handler) GetResourceSamples(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	samples, err := h.store.GetResourceSamples(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get resource samples")
+		return
+	}
+	writeJSON(w, http.StatusOK, resourceSamplesResponse{RunID: id, Samples: samples})
+}
+
+func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) Readyz(w http.ResponseWriter, r *http.Request) {
+	if h.cacheSynced() {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+}
+
+// ── UI — Run list ─────────────────────────────────────────────────────────────
+
+func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("clusterID")
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	ctx := r.Context()
+
+	cj, err := h.store.GetCronJobByName(ctx, clusterID, ns, name)
+	if err != nil || cj == nil {
+		http.Error(w, "cronjob not found", http.StatusNotFound)
+		return
+	}
+
+	runs, err := h.store.ListJobRuns(ctx, cj.ID)
+	if err != nil {
+		http.Error(w, "failed to load runs", http.StatusInternalServerError)
+		return
+	}
+
+	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns)))
+	fmt.Fprint(w, `<div class="page-content">`)
+	fmt.Fprint(w, breadcrumb(
+		`<a href="/">clusters</a>`,
+		`<a href="/clusters/`+esc(clusterID)+`">`+esc(clusterID)+`</a>`,
+		`<a href="/clusters/`+esc(clusterID)+`/cronjobs/`+esc(ns)+`">`+esc(ns)+`</a>`,
+		`<span>`+esc(name)+`</span>`,
+	))
+	fmt.Fprintf(w, `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
+	  <h1 style="font-family:var(--font-mono);color:var(--accent);font-size:1.25rem;margin:0;">%s</h1>
+	  <button class="btn btn-primary"
+	    hx-post="/api/clusters/%s/cronjobs/%s/%s/trigger"
+	    hx-confirm="Trigger a manual run?"
+	    hx-swap="none"
+	    hx-on::after-request="if(event.detail.successful){var d=JSON.parse(event.detail.xhr.responseText);window.location='/clusters/%s/cronjobs/%s/%s/runs/'+d.run_id;}else{showToast('Trigger failed',false);}">
+	    ▶ Run now
+	  </button>
+	</div>`,
+		esc(cj.Schedule), esc(clusterID), esc(ns), esc(name), esc(clusterID), esc(ns), esc(name))
+
+	if len(runs) == 0 {
+		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No runs yet.</div>`)
+	} else {
+		fmt.Fprint(w, `<div class="card" style="padding:0;overflow:hidden;"><table>
+<thead><tr>
+  <th>ID</th><th>Trigger</th><th>Status</th>
+  <th>Started</th><th>Duration</th><th>Exit code</th><th>Node</th>
+</tr></thead><tbody>`)
+
+		for _, run := range runs {
+			shortID := run.ID
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			duration := `<span style="color:var(--muted);">—</span>`
+			if run.DurationMs != nil {
+				duration = fmt.Sprintf(`<span style="font-family:var(--font-mono);">%s</span>`, fmtDuration(*run.DurationMs))
+			}
+			exitCode := `<span style="color:var(--muted);">—</span>`
+			if run.ExitCode != nil {
+				color := "var(--accent)"
+				if *run.ExitCode != 0 {
+					color = "var(--red)"
+				}
+				exitCode = fmt.Sprintf(`<span style="font-family:var(--font-mono);color:%s;">%d</span>`, color, *run.ExitCode)
+			}
+			trigger := `<span class="badge" style="border:1px solid var(--border);color:var(--muted);">scheduled</span>`
+			if run.Trigger == "manual" {
+				trigger = `<span class="badge" style="border:1px solid var(--accent);color:var(--accent);">manual</span>`
+			}
+			fmt.Fprintf(w, `<tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs/%s'">
+  <td><code style="color:var(--accent);">%s…</code></td>
+  <td>%s</td>
+  <td>%s</td>
+  <td style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">%s</td>
+  <td>%s</td>
+  <td>%s</td>
+  <td style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">%s</td>
+</tr>`,
+				esc(clusterID), esc(ns), esc(name), esc(run.ID), esc(shortID),
+				trigger,
+				statusBadge(run.Status),
+				esc(run.StartedAt.Format("2006-01-02 15:04:05")),
+				duration, exitCode,
+				esc(derefStr(run.NodeName)),
+			)
+		}
+		fmt.Fprint(w, `</tbody></table></div>`)
+	}
+	fmt.Fprint(w, `</div>`) // page-content
+	fmt.Fprint(w, htmlFootSidebar)
+}
+
+// ── UI — Run detail ───────────────────────────────────────────────────────────
+
+func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	run, err := h.store.GetJobRun(ctx, id)
+	if err != nil {
+		http.Error(w, "failed to load run", http.StatusInternalServerError)
+		return
+	}
+	if run == nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	shortID := id
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	isRunning := run.Status == "running"
+
+	clusterID := r.PathValue("clusterID")
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+
+	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
+	runsURL := "/clusters/" + esc(clusterID) + "/cronjobs/" + esc(ns) + "/" + esc(name) + "/runs"
+
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns)))
+	fmt.Fprint(w, `<div class="page-content">`)
+	fmt.Fprint(w, breadcrumb(
+		`<a href="/">clusters</a>`,
+		`<a href="/clusters/`+esc(clusterID)+`">`+esc(clusterID)+`</a>`,
+		`<a href="/clusters/`+esc(clusterID)+`/cronjobs/`+esc(ns)+`">`+esc(ns)+`</a>`,
+		`<a href="`+runsURL+`">`+esc(name)+`</a>`,
+		`<span>`+esc(shortID)+`…</span>`,
+	))
+
+	// ── Metadata card ─────────────────────────────────────────────────────────
+	duration := "running…"
+	if run.DurationMs != nil {
+		duration = fmtDuration(*run.DurationMs)
+	}
+	logSize := fmt.Sprintf("%.1f KB", float64(run.LogSizeBytes)/1024)
+
+	exitDisplay := ""
+	if run.ExitCode != nil {
+		col := "var(--green)"
+		if *run.ExitCode != 0 {
+			col = "var(--red)"
+		}
+		exitDisplay = fmt.Sprintf(`<span class="meta-kv">exit <strong id="run-exit" style="color:%s;">%d</strong></span>`, col, *run.ExitCode)
+	} else if isRunning {
+		exitDisplay = `<span class="meta-kv" id="run-exit-wrap" style="display:none">exit <strong id="run-exit"></strong></span>`
+	}
+
+	// CPU / RAM — shown for running (will be populated by SSE) and for completed runs with data.
+	resDisplay := ""
+	if isRunning {
+		resDisplay = `<span class="meta-kv" id="run-res-wrap" style="display:none">` +
+			`cpu avg <strong id="run-avg-cpu">—</strong> peak <strong id="run-max-cpu">—</strong>` +
+			` &nbsp;·&nbsp; ` +
+			`mem avg <strong id="run-avg-mem">—</strong> peak <strong id="run-max-mem">—</strong>` +
+			`</span>`
+	} else if run.AvgCPUMillicores != nil {
+		avgCPU := fmt.Sprintf("%dm", *run.AvgCPUMillicores)
+		maxCPU := avgCPU
+		if run.MaxCPUMillicores != nil {
+			maxCPU = fmt.Sprintf("%dm", *run.MaxCPUMillicores)
+		}
+		avgMem, maxMem := "—", "—"
+		if run.AvgMemoryBytes != nil {
+			avgMem = fmt.Sprintf("%d MiB", *run.AvgMemoryBytes/1048576)
+		}
+		if run.MaxMemoryBytes != nil {
+			maxMem = fmt.Sprintf("%d MiB", *run.MaxMemoryBytes/1048576)
+		}
+		resDisplay = fmt.Sprintf(
+			`<span class="meta-kv" id="run-res-wrap">`+
+				`cpu avg <strong id="run-avg-cpu">%s</strong> peak <strong id="run-max-cpu">%s</strong>`+
+				` &nbsp;·&nbsp; `+
+				`mem avg <strong id="run-avg-mem">%s</strong> peak <strong id="run-max-mem">%s</strong>`+
+				`</span>`,
+			esc(avgCPU), esc(maxCPU), esc(avgMem), esc(maxMem),
+		)
+	}
+
+	fmt.Fprintf(w, `<div class="card" style="margin-bottom:1rem;">
+  <div style="display:flex;flex-wrap:wrap;gap:1rem 1.5rem;align-items:center;">
+    <span id="run-status">%s</span>
+    <span class="meta-kv">trigger <strong style="color:var(--accent);">%s</strong></span>
+    <span class="meta-kv">duration <strong id="run-duration" style="color:var(--accent);">%s</strong></span>
+    %s
+    %s`,
+		statusBadge(run.Status),
+		esc(run.Trigger),
+		esc(duration),
+		exitDisplay,
+		resDisplay,
+	)
+
+	if run.NodeName != nil {
+		fmt.Fprintf(w, `<span class="meta-kv muted">node %s</span>`, esc(*run.NodeName))
+	}
+	if run.ContainerImage != nil {
+		fmt.Fprintf(w, `<span class="meta-kv muted">image %s</span>`, esc(*run.ContainerImage))
+	}
+	fmt.Fprintf(w, `<span id="run-logsize" class="meta-kv muted">%s</span>`, esc(logSize))
+	fmt.Fprint(w, `</div></div>`)
+
+	// ── Resource charts (completed runs with samples) ──────────────────────────
+	if !isRunning && run.AvgCPUMillicores != nil {
+		fmt.Fprintf(w, `<div class="card" style="margin-bottom:1rem;">
+  <div class="section-label">Resource usage</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+    <div class="chart-container"><canvas id="cpuChart"></canvas></div>
+    <div class="chart-container"><canvas id="memChart"></canvas></div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9"></script>
+<script>
+(function(){
+  var chartOpts = function(label, data, labels, color) {
+    return { type:'line', data:{ labels:labels, datasets:[{ label:label, data:data,
+      borderColor:color, backgroundColor:color+'22', fill:true, tension:0.3, pointRadius:2 }] },
+      options:{ responsive:true, maintainAspectRatio:false,
+        scales:{ y:{ beginAtZero:true, grid:{color:'#1e1e2e'}, ticks:{color:'#718096'} },
+                 x:{ grid:{color:'#1e1e2e'}, ticks:{color:'#718096', maxTicksLimit:8} } },
+        plugins:{ legend:{ labels:{color:'#e2e8f0'} } } } };
+  };
+  fetch('/api/runs/%s/resources').then(function(r){return r.json();}).then(function(d){
+    if (!d.samples || !d.samples.length) return;
+    var labels = d.samples.map(function(s){return new Date(s.sampled_at).toLocaleTimeString();});
+    var cpu = d.samples.map(function(s){return s.cpu_millicores;});
+    var mem = d.samples.map(function(s){return Math.round(s.memory_bytes/1048576);});
+    new Chart(document.getElementById('cpuChart'), chartOpts('CPU (m)', cpu, labels, '#6c8ef7'));
+    new Chart(document.getElementById('memChart'), chartOpts('Memory (MiB)', mem, labels, '#48bb78'));
+  });
+})();
+</script>`, esc(id))
+	}
+
+	// ── Log terminal ──────────────────────────────────────────────────────────
+	fmt.Fprint(w, `<div class="card"><div class="section-label">Logs</div>`)
+
+	if isRunning {
+		// Empty terminal — the EventSource below fills it (historical + live).
+		fmt.Fprint(w, `<div id="log-term" class="log-terminal"></div>`)
+		fmt.Fprintf(w, `<script>
+(function(){
+  var term = document.getElementById('log-term');
+  var es = new EventSource('/api/runs/%s/stream');
+
+  es.onmessage = function(e) {
+    if (!e.data) return;
+    term.textContent += e.data + '\n';
+    term.scrollTop = term.scrollHeight;
+  };
+
+  es.addEventListener('status', function(e) {
+    var d = JSON.parse(e.data);
+    var badge = {running:'badge-running',succeeded:'badge-success',failed:'badge-failed'};
+    var cls = badge[d.status] || 'badge-muted';
+    var st = document.getElementById('run-status');
+    if (st) st.innerHTML = '<span class="badge '+cls+'">'+d.status+'</span>';
+    var dur = document.getElementById('run-duration');
+    if (dur) dur.textContent = d.duration || 'running…';
+    if (d.exit_code !== null && d.exit_code !== undefined) {
+      var ew = document.getElementById('run-exit-wrap');
+      if (ew) ew.style.display = '';
+      var ex = document.getElementById('run-exit');
+      if (ex) { ex.textContent = d.exit_code; ex.style.color = d.exit_code===0?'var(--green)':'var(--red)'; }
+    }
+    if (d.avg_cpu_m != null) {
+      var rw = document.getElementById('run-res-wrap');
+      if (rw) rw.style.display = '';
+      var el = document.getElementById('run-avg-cpu'); if(el) el.textContent = d.avg_cpu_m+'m';
+      el = document.getElementById('run-max-cpu'); if(el && d.max_cpu_m) el.textContent = d.max_cpu_m+'m';
+      el = document.getElementById('run-avg-mem'); if(el && d.avg_mem_mb!=null) el.textContent = d.avg_mem_mb+' MiB';
+      el = document.getElementById('run-max-mem'); if(el && d.max_mem_mb!=null) el.textContent = d.max_mem_mb+' MiB';
+    }
+    var ls = document.getElementById('run-logsize');
+    if (ls && d.log_size_kb) ls.textContent = d.log_size_kb;
+  });
+
+  es.addEventListener('done', function() { es.close(); term.scrollTop = term.scrollHeight; });
+  es.onerror = function() { es.close(); };
+})();
+</script>`, esc(id))
+	} else {
+		lines, _ := h.store.GetLogLines(ctx, id)
+		fmt.Fprint(w, `<div id="log-term" class="log-terminal">`)
+		var sb strings.Builder
+		for _, l := range lines {
+			sb.WriteString(esc(l.Line))
+			sb.WriteByte('\n')
+		}
+		fmt.Fprint(w, sb.String())
+		fmt.Fprint(w, `</div>`)
+		fmt.Fprint(w, `<script>
+var t=document.getElementById('log-term');
+if(t) t.scrollTop=t.scrollHeight;
+</script>`)
+	}
+
+	fmt.Fprint(w, `</div></div>`) // page-content
+	fmt.Fprint(w, htmlFootSidebar)
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v) //nolint:errcheck
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}

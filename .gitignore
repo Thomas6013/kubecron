@@ -1,0 +1,34 @@
+# Compiled binary
+/kubecron
+/kubecron.exe
+
+.claude
+dev
+dev/
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+
+# Local env
+.env
+
+# Dev kubeconfigs (directory is committed, content is not)
+dev/kubeconfigs/*.yaml
+dev/kubeconfigs/*.yml
+dev/kubeconfigs/*.conf
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp

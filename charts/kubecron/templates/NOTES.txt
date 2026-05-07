@@ -1,0 +1,16 @@
+KubeCron has been deployed.
+
+  URL:
+  {{- if .Values.ingress.enabled }}
+    https://{{ .Values.ingress.host }}
+  {{- else if eq .Values.service.type "NodePort" }}
+    http://<node-ip>:<node-port>
+  {{- else }}
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubecron.fullname" . }} 8080:{{ .Values.service.port }}
+    then open http://localhost:8080
+  {{- end }}
+
+  Run history is kept for {{ .Values.config.retentionDays }} day(s) (config.retentionDays).
+
+  To watch logs:
+    kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "kubecron.name" . }} -f

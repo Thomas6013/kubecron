@@ -1,0 +1,38 @@
+package templates
+
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+	<head>
+		<meta charset="UTF-8"/>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+		<title>{ title } — KubeCron</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com"/>
+		<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;800&display=swap" rel="stylesheet"/>
+		<link rel="stylesheet" href="/static/app.css"/>
+		<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+	</head>
+	<body>
+		<nav>
+			<a class="logo" href="/">[KubeCron]</a>
+			<a href="/">Clusters</a>
+		</nav>
+		<div id="toast"></div>
+		{ children... }
+		<script>
+			function showToast(msg, ok) {
+				const t = document.getElementById('toast');
+				t.textContent = msg;
+				t.style.borderColor = ok ? 'var(--accent)' : 'var(--danger)';
+				t.style.color = ok ? 'var(--accent)' : 'var(--danger)';
+				t.classList.add('show');
+				setTimeout(() => t.classList.remove('show'), 3000);
+			}
+			document.body.addEventListener('htmx:afterRequest', function(e) {
+				if (e.detail.successful) showToast('Done', true);
+				else showToast('Error: ' + e.detail.xhr.status, false);
+			});
+		</script>
+	</body>
+	</html>
+}

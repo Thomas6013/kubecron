@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kubecron
+description: Monitor Kubernetes CronJob executions across multiple clusters
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+keywords:
+  - kubernetes
+  - cronjob
+  - monitoring
+home: https://github.com/thomas6013/kubecron
+sources:
+  - https://github.com/thomas6013/kubecron
+maintainers:
+  - name: thomas6013

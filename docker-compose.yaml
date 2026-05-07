@@ -1,0 +1,38 @@
+# Usage :
+#   1. Copier ta kubeconfig dans dev/kubeconfigs/<nom-cluster>
+#      ⚠️  Si cluster local (kind/minikube) : remplacer 127.0.0.1 par host.docker.internal dans server:
+#   2. docker compose up
+#   3. http://localhost:8080
+
+services:
+  kubecron:
+    image: golang:1.26-alpine
+    working_dir: /app
+    command: >
+      sh -c "
+        go install github.com/a-h/templ/cmd/templ@v0.3.1001 &&
+        templ generate &&
+        go run ./cmd/kubecron
+      "
+    ports:
+      - "8082:8080"
+    environment:
+      DB_PATH: /data/kubecron.db
+      KUBECONFIG_DIR: /etc/kubecron/kubeconfigs
+      OIDC_ENABLED: ${OIDC_ENABLED:-false}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+      OIDC_SESSION_KEY: ${OIDC_SESSION_KEY:-}
+    volumes:
+      - .:/app
+      - kubecron-data:/data
+      - ./dev/kubeconfigs:/etc/kubecron/kubeconfigs:ro
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+
+volumes:
+  kubecron-data:
+  go-mod-cache:
+  go-build-cache:

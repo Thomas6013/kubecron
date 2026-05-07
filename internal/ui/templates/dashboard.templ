@@ -1,0 +1,43 @@
+package templates
+
+import (
+	"fmt"
+	"github.com/kubecron/kubecron/internal/storage"
+)
+
+type ClusterCard struct {
+	storage.Cluster
+	CronJobCount int
+	RunningCount int
+}
+
+templ Dashboard(clusters []ClusterCard) {
+	@Layout("Dashboard") {
+		<div class="container">
+			<h1 style="font-family:var(--font-mono);color:var(--accent);margin-bottom:1.5rem;font-size:1.5rem;">Clusters</h1>
+			<div class="grid grid-2" id="clusters" hx-get="/api/clusters-partial" hx-trigger="every 10s" hx-swap="innerHTML">
+				for _, c := range clusters {
+					<a href={ templ.SafeURL(fmt.Sprintf("/clusters/%s", c.ID)) } style="text-decoration:none;">
+						<div class="card" style="cursor:pointer;">
+							<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">
+								<span style="font-family:var(--font-mono);color:var(--accent);font-size:1rem;">{ c.Name }</span>
+								<span class={ "metrics-dot", templ.KV("enabled", c.MetricsEnabled) } title="Metrics API"></span>
+							</div>
+							<div style="display:flex;gap:1rem;font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">
+								<span>{ fmt.Sprintf("%d cronjobs", c.CronJobCount) }</span>
+								if c.RunningCount > 0 {
+									<span class="badge badge-running">{ fmt.Sprintf("%d running", c.RunningCount) }</span>
+								}
+							</div>
+						</div>
+					</a>
+				}
+				if len(clusters) == 0 {
+					<div class="card" style="grid-column:1/-1;text-align:center;color:var(--text-muted);">
+						<p style="font-family:var(--font-mono);">No clusters loaded. Check KUBECONFIG_DIR.</p>
+					</div>
+				}
+			</div>
+		</div>
+	}
+}

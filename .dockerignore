@@ -1,0 +1,7 @@
+.git
+.claude
+*.md
+k8s/
+dev/
+compose*.yaml
+*.sum
