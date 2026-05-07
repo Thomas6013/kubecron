@@ -8,6 +8,8 @@ RUN templ generate
 # Stage 2: build binary
 FROM golang:1.26-alpine AS builder
 WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
 COPY --from=templ-gen /app .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o kubecron ./cmd/kubecron
 
