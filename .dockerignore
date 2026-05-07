@@ -4,4 +4,3 @@
 k8s/
 dev/
 compose*.yaml
-*.sum
