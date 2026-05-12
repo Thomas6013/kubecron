@@ -253,11 +253,11 @@ func (s *SQLiteStore) GetRecentDurations(ctx context.Context, cronjobID string, 
 
 func (s *SQLiteStore) GetDailyRunStats(ctx context.Context, cronjobID string, days int) ([]DailyRunStat, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT date(started_at), COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END)
+		SELECT substr(started_at, 1, 10), COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END)
 		FROM job_runs
 		WHERE cronjob_id = ? AND started_at > datetime('now', ?)
-		GROUP BY date(started_at)
-		ORDER BY date(started_at)`,
+		GROUP BY substr(started_at, 1, 10)
+		ORDER BY substr(started_at, 1, 10)`,
 		cronjobID, fmt.Sprintf("-%d days", days),
 	)
 	if err != nil {
