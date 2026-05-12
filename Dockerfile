@@ -1,6 +1,6 @@
 # Stage 1: generate templ templates
 FROM golang:1.26-alpine AS templ-gen
-RUN go install github.com/a-h/templ/cmd/templ@v0.3.1001
+RUN go install github.com/a-h/templ/cmd/templ@v0.3.1020
 WORKDIR /app
 COPY . .
 RUN templ generate

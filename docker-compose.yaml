@@ -1,8 +1,13 @@
-# Usage :
-#   1. Copier ta kubeconfig dans dev/kubeconfigs/<nom-cluster>
-#      ⚠️  Si cluster local (kind/minikube) : remplacer 127.0.0.1 par host.docker.internal dans server:
+# KubeCron — dev environment with live reload (air)
+#
+# Setup:
+#   1. Kubeconfig(s) déjà présents dans dev/kubeconfigs/ (ex: "admin")
+#      ⚠ Si cluster local (kind/minikube): remplacer 127.0.0.1 par host.docker.internal
 #   2. docker compose up
-#   3. http://localhost:8080
+#   3. http://localhost:8082
+#
+# Air surveille les fichiers .go/.templ/.css/.sql et rebuild + redémarre à chaque changement.
+# Premier démarrage ~2 min (install templ+air + build). Suivants ~5 s grâce aux caches.
 
 services:
   kubecron:
@@ -10,15 +15,18 @@ services:
     working_dir: /app
     command: >
       sh -c "
-        go install github.com/a-h/templ/cmd/templ@v0.3.1001 &&
-        templ generate &&
-        go run ./cmd/kubecron
+        command -v templ || go install github.com/a-h/templ/cmd/templ@v0.3.1020 &&
+        command -v air   || go install github.com/air-verse/air@latest &&
+        air -c .air.toml
       "
     ports:
       - "8082:8080"
     environment:
       DB_PATH: /data/kubecron.db
       KUBECONFIG_DIR: /etc/kubecron/kubeconfigs
+      PORT: "8080"
+      RETENTION_DAYS: "7"
+      METRICS_SAMPLE_INTERVAL: "15"
       OIDC_ENABLED: ${OIDC_ENABLED:-false}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}

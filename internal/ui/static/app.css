@@ -268,3 +268,39 @@ mark.log-hl { background: rgba(236,201,75,0.35); color: var(--yellow); border-ra
   box-shadow: 0 4px 20px rgba(0,0,0,0.4);
 }
 #toast.show { opacity: 1; }
+
+/* ── Mobile ───────────────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .container, .page-content { padding: 12px 14px; }
+  .card { padding: 14px; }
+
+  /* Sidebar becomes a thin horizontal strip at the top */
+  .page-layout { flex-direction: column; height: auto; overflow: visible; }
+  .sidebar {
+    width: 100%; height: auto; flex-direction: row; flex-wrap: wrap;
+    border-right: none; border-bottom: 1px solid var(--border);
+    padding: 8px 12px; gap: 4px; overflow-y: visible;
+  }
+  .sidebar-title { display: none; }
+  .sidebar-stats { border-top: none; margin-top: 0; padding-top: 0; flex-direction: row; gap: 8px; }
+  .ns-link { padding: 3px 8px; font-size: 11px; }
+  .page-main { overflow-y: visible; }
+
+  /* Tables scroll horizontally */
+  .card table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+
+  /* Log terminal shorter on mobile */
+  .log-terminal { height: 280px; font-size: 12px; }
+
+  /* Resource charts stack */
+  #resource-charts > div > div { grid-template-columns: 1fr !important; }
+
+  /* Run metadata wraps naturally */
+  .card [style*="flex-wrap:wrap"] { gap: 0.5rem 1rem; }
+
+  /* Grids collapse to 1 column */
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+
+  /* Nav */
+  nav { padding: 0 14px; gap: 14px; }
+}
