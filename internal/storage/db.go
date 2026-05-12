@@ -31,6 +31,8 @@ type Store interface {
 	ListJobRuns(ctx context.Context, cronjobID string) ([]JobRun, error)
 	GetLastJobRun(ctx context.Context, cronjobID string) (*JobRun, error)
 	GetRunStats7d(ctx context.Context, cronjobID string) (*RunStats, error)
+	GetRecentDurations(ctx context.Context, cronjobID string, limit int) ([]int64, error)
+	GetDailyRunStats(ctx context.Context, cronjobID string, days int) ([]DailyRunStat, error)
 	UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error
 	UpdateJobRunNode(ctx context.Context, id, nodeName, containerImage string) error
 	GetRunningRuns(ctx context.Context) ([]JobRun, error)

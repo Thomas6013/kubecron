@@ -137,9 +137,12 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 
 	type row struct {
 		storage.CronJob
-		NextRun time.Time
-		LastRun *storage.JobRun
-		Stats7d *storage.RunStats
+		NextRun      time.Time
+		LastRun      *storage.JobRun
+		Stats7d      *storage.RunStats
+		Durations    []int64
+		IsMissed     bool
+		IsConcurrent bool
 	}
 
 	type nsGroup struct {
@@ -147,14 +150,34 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 		Rows      []row
 	}
 
+	// Precompute running counts from GetRunningRuns.
+	runningRuns, _ := h.store.GetRunningRuns(ctx)
+	runningCount := make(map[string]int)
+	for _, rr := range runningRuns {
+		runningCount[rr.CronJobID]++
+	}
+
+	now := time.Now()
+
 	// ListCronJobs returns rows ordered by namespace, name — preserve that order.
 	var groups []nsGroup
 	nsIdx := map[string]int{}
 	for _, cj := range cronjobs {
 		r := row{CronJob: cj}
-		r.NextRun, _ = schedule.NextRun(cj.Schedule, time.Now())
+		r.NextRun, _ = schedule.NextRun(cj.Schedule, now)
 		r.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
 		r.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
+		r.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
+		r.IsConcurrent = runningCount[cj.ID] > 1
+		if !cj.Suspended {
+			if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
+				if now.Sub(prev) > 5*time.Minute {
+					if r.LastRun == nil || (r.LastRun.Status != "running" && r.LastRun.StartedAt.Before(prev)) {
+						r.IsMissed = true
+					}
+				}
+			}
+		}
 		if _, ok := nsIdx[cj.Namespace]; !ok {
 			nsIdx[cj.Namespace] = len(groups)
 			groups = append(groups, nsGroup{Namespace: cj.Namespace})
@@ -192,6 +215,9 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 				if row.LastRun != nil {
 					lastStatus = statusBadge(row.LastRun.Status)
 				}
+				if row.IsConcurrent {
+					lastStatus += ` <span class="badge" style="border-color:rgba(236,201,75,0.4);color:var(--yellow);">⚠ concurrent</span>`
+				}
 
 				stats7d := `<span style="color:var(--muted);">—</span>`
 				if row.Stats7d != nil && row.Stats7d.Total > 0 {
@@ -205,6 +231,7 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 					stats7d = fmt.Sprintf(`<span style="font-family:var(--font-mono);font-size:0.8rem;color:%s;">%d/%d</span>`,
 						color, row.Stats7d.Succeeded, row.Stats7d.Total)
 				}
+				stats7d += sparklineSVG(row.Durations)
 
 				resources := `<span style="color:var(--muted);">—</span>`
 				if row.CPURequest != nil || row.MemoryRequest != nil {
@@ -222,6 +249,9 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 				if row.Suspended {
 					nameColor = "var(--yellow)"
 					suspendedTag = ` <span class="badge badge-suspended">paused</span>`
+				}
+				if row.IsMissed {
+					suspendedTag += ` <span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);">missed</span>`
 				}
 
 				suspendBtn := fmt.Sprintf(
@@ -292,19 +322,43 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 
 	type row struct {
 		storage.CronJob
-		NextRun time.Time
-		LastRun *storage.JobRun
-		Stats7d *storage.RunStats
+		NextRun      time.Time
+		LastRun      *storage.JobRun
+		Stats7d      *storage.RunStats
+		Durations    []int64
+		IsMissed     bool
+		IsConcurrent bool
 	}
+
+	// Precompute running counts.
+	runningRuns, _ := h.store.GetRunningRuns(ctx)
+	runningCount := make(map[string]int)
+	for _, rr := range runningRuns {
+		runningCount[rr.CronJobID]++
+	}
+
+	now := time.Now()
+
 	var rows []row
 	for _, cj := range allCronJobs {
 		if cj.Namespace != ns {
 			continue
 		}
 		r2 := row{CronJob: cj}
-		r2.NextRun, _ = schedule.NextRun(cj.Schedule, time.Now())
+		r2.NextRun, _ = schedule.NextRun(cj.Schedule, now)
 		r2.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
 		r2.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
+		r2.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
+		r2.IsConcurrent = runningCount[cj.ID] > 1
+		if !cj.Suspended {
+			if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
+				if now.Sub(prev) > 5*time.Minute {
+					if r2.LastRun == nil || (r2.LastRun.Status != "running" && r2.LastRun.StartedAt.Before(prev)) {
+						r2.IsMissed = true
+					}
+				}
+			}
+		}
 		rows = append(rows, r2)
 	}
 
@@ -331,6 +385,9 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 			if row.LastRun != nil {
 				lastStatus = statusBadge(row.LastRun.Status)
 			}
+			if row.IsConcurrent {
+				lastStatus += ` <span class="badge" style="border-color:rgba(236,201,75,0.4);color:var(--yellow);">⚠ concurrent</span>`
+			}
 			stats7d := `<span style="color:var(--muted);">—</span>`
 			if row.Stats7d != nil && row.Stats7d.Total > 0 {
 				color := "var(--green)"
@@ -343,6 +400,7 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 				stats7d = fmt.Sprintf(`<span style="font-family:var(--font-mono);font-size:0.8rem;color:%s;">%d/%d</span>`,
 					color, row.Stats7d.Succeeded, row.Stats7d.Total)
 			}
+			stats7d += sparklineSVG(row.Durations)
 			resources := `<span style="color:var(--muted);">—</span>`
 			if row.CPURequest != nil || row.MemoryRequest != nil {
 				resources = ""
@@ -358,6 +416,9 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 			if row.Suspended {
 				nameColor = "var(--yellow)"
 				suspendedTag = ` <span class="badge badge-suspended">paused</span>`
+			}
+			if row.IsMissed {
+				suspendedTag += ` <span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);">missed</span>`
 			}
 			suspendBtn := fmt.Sprintf(
 				`<button class="btn ghost" style="font-size:0.75rem;"

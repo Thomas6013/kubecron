@@ -228,6 +228,54 @@ func (s *SQLiteStore) GetRunStats7d(ctx context.Context, cronjobID string) (*Run
 	return &stats, nil
 }
 
+func (s *SQLiteStore) GetRecentDurations(ctx context.Context, cronjobID string, limit int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT duration_ms FROM job_runs
+		WHERE cronjob_id = ? AND duration_ms IS NOT NULL AND status IN ('succeeded','failed')
+		ORDER BY started_at DESC LIMIT ?`,
+		cronjobID, limit,
+	)
+	if err != nil {
+		return nil, wrapErr("GetRecentDurations", err)
+	}
+	defer rows.Close()
+
+	var out []int64
+	for rows.Next() {
+		var d int64
+		if err := rows.Scan(&d); err != nil {
+			return nil, wrapErr("GetRecentDurations scan", err)
+		}
+		out = append(out, d)
+	}
+	return out, wrapErr("GetRecentDurations rows", rows.Err())
+}
+
+func (s *SQLiteStore) GetDailyRunStats(ctx context.Context, cronjobID string, days int) ([]DailyRunStat, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT date(started_at), COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END)
+		FROM job_runs
+		WHERE cronjob_id = ? AND started_at > datetime('now', ?)
+		GROUP BY date(started_at)
+		ORDER BY date(started_at)`,
+		cronjobID, fmt.Sprintf("-%d days", days),
+	)
+	if err != nil {
+		return nil, wrapErr("GetDailyRunStats", err)
+	}
+	defer rows.Close()
+
+	var out []DailyRunStat
+	for rows.Next() {
+		var d DailyRunStat
+		if err := rows.Scan(&d.Day, &d.Total, &d.Succeeded); err != nil {
+			return nil, wrapErr("GetDailyRunStats scan", err)
+		}
+		out = append(out, d)
+	}
+	return out, wrapErr("GetDailyRunStats rows", rows.Err())
+}
+
 func (s *SQLiteStore) UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE job_runs

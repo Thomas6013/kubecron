@@ -68,3 +68,10 @@ type RunStats struct {
 	AvgCPUMillicores *int64 `json:"avg_cpu_millicores,omitempty"`
 	AvgMemoryBytes   *int64 `json:"avg_memory_bytes,omitempty"`
 }
+
+// DailyRunStat holds aggregated run statistics for a single calendar day.
+type DailyRunStat struct {
+	Day       string `json:"day"`
+	Total     int    `json:"total"`
+	Succeeded int    `json:"succeeded"`
+}

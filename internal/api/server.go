@@ -69,6 +69,7 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /api/clusters/{clusterID}/cronjobs/{ns}/{name}/runs", h.ListRuns)
 	mux.HandleFunc("GET /api/runs/{id}/stream", h.StreamLogs)
 	mux.HandleFunc("GET /api/runs/{id}/resources", h.GetResourceSamples)
+	mux.HandleFunc("GET /api/runs/{id}/logs.txt", h.DownloadLogs)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/suspend", h.Suspend)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume", h.Resume)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", h.Trigger)

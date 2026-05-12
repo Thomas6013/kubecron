@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
@@ -34,7 +33,7 @@ func (h *Handler) ListRuns(w http.ResponseWriter, r *http.Request) {
 
 type resourceSamplesResponse struct {
 	RunID   string      `json:"run_id"`
-	Samples interface{} `json:"samples"`
+	Samples any `json:"samples"`
 }
 
 func (h *Handler) GetResourceSamples(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +78,8 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dailyStats, _ := h.store.GetDailyRunStats(ctx, cj.ID, 90)
+
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -101,6 +102,12 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	  </button>
 	</div>`,
 		esc(cj.Schedule), esc(clusterID), esc(ns), esc(name), esc(clusterID), esc(ns), esc(name))
+
+	// 90-day history heatmap card.
+	fmt.Fprint(w, `<div class="card" style="margin-bottom:1rem;">`)
+	fmt.Fprint(w, `<div class="section-label">90-day history</div>`)
+	fmt.Fprint(w, heatmapHTML(dailyStats, 90))
+	fmt.Fprint(w, `</div>`)
 
 	if len(runs) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No runs yet.</div>`)
@@ -302,6 +309,7 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 
 	// ── Log terminal ──────────────────────────────────────────────────────────
 	fmt.Fprint(w, `<div class="card"><div class="section-label">Logs</div>`)
+	fmt.Fprint(w, logSearchBar(id))
 
 	if isRunning {
 		// Empty terminal — the EventSource below fills it (historical + live).
@@ -313,8 +321,7 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 
   es.onmessage = function(e) {
     if (!e.data) return;
-    term.textContent += e.data + '\n';
-    term.scrollTop = term.scrollHeight;
+    term.insertAdjacentHTML('beforeend', e.data);
   };
 
   es.addEventListener('status', function(e) {
@@ -343,28 +350,38 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
     if (ls && d.log_size_kb) ls.textContent = d.log_size_kb;
   });
 
-  es.addEventListener('done', function() { es.close(); term.scrollTop = term.scrollHeight; });
+  es.addEventListener('done', function() { es.close(); });
   es.onerror = function() { es.close(); };
 })();
 </script>`, esc(id))
 	} else {
 		lines, _ := h.store.GetLogLines(ctx, id)
 		fmt.Fprint(w, `<div id="log-term" class="log-terminal">`)
-		var sb strings.Builder
 		for _, l := range lines {
-			sb.WriteString(esc(l.Line))
-			sb.WriteByte('\n')
+			fmt.Fprintf(w, `<div class="ll" data-raw="%s">%s</div>`, esc(l.Line), esc(l.Line))
 		}
-		fmt.Fprint(w, sb.String())
 		fmt.Fprint(w, `</div>`)
-		fmt.Fprint(w, `<script>
-var t=document.getElementById('log-term');
-if(t) t.scrollTop=t.scrollHeight;
-</script>`)
 	}
 
+	fmt.Fprint(w, logSearchJS)
 	fmt.Fprint(w, `</div></div>`) // page-content
 	fmt.Fprint(w, htmlFootSidebar)
+}
+
+// DownloadLogs handles GET /api/runs/{id}/logs.txt and returns raw log lines
+// as a plain-text file download.
+func (h *Handler) DownloadLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	lines, _ := h.store.GetLogLines(r.Context(), id)
+	fname := id
+	if len(fname) > 8 {
+		fname = fname[:8]
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="run-%s.log"`, fname))
+	for _, l := range lines {
+		fmt.Fprintln(w, l.Line)
+	}
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

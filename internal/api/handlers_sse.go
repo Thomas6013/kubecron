@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"time"
 
@@ -96,7 +97,8 @@ func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	if run.Status != "running" {
 		lines, _ := h.store.GetLogLines(ctx, id)
 		for _, l := range lines {
-			fmt.Fprintf(w, "data: %s\n\n", l.Line)
+			esc := html.EscapeString(l.Line)
+			fmt.Fprintf(w, "data: <div class=\"ll\" data-raw=\"%s\">%s</div>\n\n", esc, esc)
 		}
 		fmt.Fprintf(w, "event: done\ndata: {}\n\n")
 		flusher.Flush()
@@ -133,7 +135,8 @@ func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 				broadcastDone = true
 				broadcastAt = time.Now()
 			} else {
-				fmt.Fprintf(w, "data: %s\n\n", line)
+				esc := html.EscapeString(line)
+				fmt.Fprintf(w, "data: <div class=\"ll\" data-raw=\"%s\">%s</div>\n\n", esc, esc)
 				flusher.Flush()
 			}
 

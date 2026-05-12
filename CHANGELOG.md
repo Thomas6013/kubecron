@@ -8,6 +8,20 @@ All notable changes to KubeCron are documented here.
 
 ---
 
+## [0.1.0] - 2026-05-12
+
+### Added
+
+- **Missed run detection** — CronJobs that should have run but did not are flagged with a `missed` badge in the cluster and namespace views; detection is based on the previous scheduled tick (≤25h lookback, 5-minute grace)
+- **Concurrent run detection** — when multiple runs of the same CronJob are simultaneously active, a `⚠ concurrent` badge appears next to the last status
+- **Log level colorization** — log lines are automatically colorized by severity (FATAL/CRITICAL, ERROR, WARN, INFO, DEBUG) using a MutationObserver that handles both static and live-streamed logs
+- **Regex log search** — a search bar above the log terminal accepts a regular expression, highlights matches with `<mark>`, shows a filtered line count, and hides non-matching lines
+- **Duration sparkline** — a 60×16 SVG sparkline of the last 20 completed run durations (oldest→newest) is displayed alongside the 7-day success ratio in both cluster and namespace views
+- **Log download button** — a `⬇ .log` link in the log toolbar triggers a plain-text download via `GET /api/runs/{id}/logs.txt`
+- **Calendar heatmap** — a 90-day SVG heatmap on the run list page shows per-day success/failure/partial status; green = all succeeded, yellow = partial, red = all failed, surface2 = no runs
+
+---
+
 ## [0.0.1] - 2026-05-07
 
 ### Added

@@ -80,14 +80,18 @@ templ RunDetail(d RunDetailData) {
 
 			// Log terminal
 			<div class="card">
-				<h3 style="font-family:var(--font-mono);color:var(--text-muted);font-size:0.85rem;margin-bottom:0.75rem;">LOGS</h3>
+				<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+					<h3 style="font-family:var(--font-mono);color:var(--text-muted);font-size:0.85rem;flex-shrink:0;">LOGS</h3>
+					<input id="log-search" type="text" placeholder="filter (regex)…" autocomplete="off" spellcheck="false"
+						style="flex:1;max-width:360px;background:#0a0c12;color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 10px;font-family:var(--font-mono);font-size:12px;outline:none;transition:border-color 0.15s;"/>
+					<span id="log-count" style="font-family:var(--font-mono);font-size:11px;color:var(--muted);white-space:nowrap;min-width:80px;"></span>
+				</div>
 				if d.Run.Status == "running" {
 					<div id="log-term" class="log-terminal" hx-ext="sse" sse-connect={ fmt.Sprintf("/api/runs/%s/stream", d.Run.ID) } sse-swap="message" hx-swap="beforeend"></div>
 				} else {
 					<div id="log-term" class="log-terminal">
 						for _, l := range d.LogLines {
-							{ l.Line }
-							{ "\n" }
+							<div class="ll" data-raw={ l.Line }>{ l.Line }</div>
 						}
 					</div>
 				}
@@ -95,13 +99,85 @@ templ RunDetail(d RunDetailData) {
 		</div>
 		<script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" defer></script>
 		<script>
-			// Auto-scroll log terminal
-			const term = document.getElementById('log-term');
-			if (term) {
-				const obs = new MutationObserver(() => term.scrollTop = term.scrollHeight);
-				obs.observe(term, {childList:true, subtree:true});
+			(function() {
+				const searchEl = document.getElementById('log-search');
+				const countEl  = document.getElementById('log-count');
+				const term     = document.getElementById('log-term');
+				if (!term) return;
+
+				function escHTML(s) {
+					return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+				}
+
+				function highlight(raw, re) {
+					let out = '', last = 0;
+					const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+					let m;
+					while ((m = g.exec(raw)) !== null) {
+						out += escHTML(raw.slice(last, m.index));
+						out += '<mark class="log-hl">' + escHTML(m[0]) + '</mark>';
+						last = g.lastIndex;
+						if (m[0].length === 0) g.lastIndex++;
+					}
+					return out + escHTML(raw.slice(last));
+				}
+
+				function filterLine(el, re) {
+					const raw = el.dataset.raw || '';
+					if (!re || re.test(raw)) {
+						el.style.display = '';
+						el.innerHTML = re ? highlight(raw, re) : escHTML(raw);
+						return true;
+					}
+					el.style.display = 'none';
+					return false;
+				}
+
+				function refreshCount() {
+					const all = term.querySelectorAll('.ll');
+					let v = 0;
+					all.forEach(el => { if (el.style.display !== 'none') v++; });
+					countEl.textContent = all.length > 0 ? v + ' / ' + all.length + ' lines' : '';
+				}
+
+				function applyFilter() {
+					const pat = searchEl.value;
+					let re = null;
+					if (pat) {
+						try { re = new RegExp(pat, 'i'); searchEl.style.borderColor = ''; }
+						catch(e) { searchEl.style.borderColor = 'var(--red)'; refreshCount(); return; }
+					} else {
+						searchEl.style.borderColor = '';
+					}
+					term.querySelectorAll('.ll').forEach(el => filterLine(el, re));
+					refreshCount();
+				}
+
+				searchEl.addEventListener('input', applyFilter);
+
+				// Initial count for static (non-running) pages
+				refreshCount();
+
+				const obs = new MutationObserver((mutations) => {
+					const pat = searchEl.value;
+					let re = null;
+					if (pat) { try { re = new RegExp(pat, 'i'); } catch(e) {} }
+
+					let added = false;
+					for (const mut of mutations) {
+						for (const node of mut.addedNodes) {
+							if (node.nodeType === 1 && node.classList.contains('ll')) {
+								filterLine(node, re);
+								added = true;
+							}
+						}
+					}
+					if (added) refreshCount();
+					if (!pat) term.scrollTop = term.scrollHeight;
+				});
+				obs.observe(term, { childList: true });
 				term.scrollTop = term.scrollHeight;
-			}
+			})();
 		</script>
 	}
 }

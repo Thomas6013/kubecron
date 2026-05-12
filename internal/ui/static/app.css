@@ -234,6 +234,18 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   word-break: break-all;
 }
 
+/* ── Log search ───────────────────────────────────────────────────────────────── */
+#log-search:focus { border-color: var(--accent) !important; }
+.log-terminal .ll { display: block; }
+mark.log-hl { background: rgba(236,201,75,0.35); color: var(--yellow); border-radius: 2px; padding: 0 1px; font-style: normal; }
+
+/* ── Log level colors ─────────────────────────────────────────────────────────── */
+.log-terminal .log-error { color: var(--red); }
+.log-terminal .log-fatal { color: var(--red); font-weight: 600; }
+.log-terminal .log-warn  { color: var(--yellow); }
+.log-terminal .log-info  { color: var(--text); opacity: 0.75; }
+.log-terminal .log-debug { color: var(--muted); }
+
 /* ── Chart container ──────────────────────────────────────────────────────────── */
 .chart-container { position: relative; height: 160px; }
 

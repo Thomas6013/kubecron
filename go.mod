@@ -3,7 +3,7 @@ module github.com/kubecron/kubecron
 go 1.26.0
 
 require (
-	github.com/a-h/templ v0.3.1001
+	github.com/a-h/templ v0.3.1020
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/prometheus/client_golang v1.23.2

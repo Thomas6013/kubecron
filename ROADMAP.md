@@ -21,10 +21,16 @@ Items are not committed to any timeline — this is a solo side project.
 - [x] **Suspend / Resume / Trigger** — CronJob control from the dashboard _(v0.0.1)_
 - [x] **OIDC authentication** _(v0.0.1)_
 - [x] **Prometheus metrics** _(v0.0.1)_
+- [x] **Missed run detection** — `missed` badge when a CronJob skipped a scheduled tick _(v0.1.0)_
+- [x] **Concurrent run detection** — `⚠ concurrent` badge when multiple runs are active simultaneously _(v0.1.0)_
+- [x] **Log level colorization** — FATAL/ERROR/WARN/INFO/DEBUG coloring in the log terminal _(v0.1.0)_
+- [x] **Log search** — regex filter with match highlighting and line count _(v0.1.0)_
+- [x] **Duration sparkline** — 20-run SVG sparkline alongside the 7-day success ratio _(v0.1.0)_
+- [x] **Log download** — plain-text `.log` download for any run _(v0.1.0)_
+- [x] **Calendar heatmap** — 90-day per-day success/failure heatmap on the run list page _(v0.1.0)_
 - [ ] **S3 log storage** — store log lines in S3/object storage instead of SQLite for unlimited retention
 - [ ] **Alerting** — webhook or email notification when a CronJob fails or is missing
 - [ ] **Grafana dashboard** — pre-built dashboard JSON for `kubecron_*` metrics
-- [ ] **Log search** — full-text search across stored log lines
 - [ ] **Pagination** — cursor-based pagination for large run history lists
 - [ ] **CronJob annotations** — display description, owner, runbook link from K8s annotations
 - [ ] **Dark / light mode toggle**
