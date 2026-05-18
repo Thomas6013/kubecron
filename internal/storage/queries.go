@@ -449,6 +449,14 @@ func (s *SQLiteStore) DeleteOldData(ctx context.Context, before time.Time) error
 	return wrapErr("DeleteOldData", err)
 }
 
+func (s *SQLiteStore) DeleteOldLogLines(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM log_lines WHERE run_id IN (SELECT id FROM job_runs WHERE started_at < ?)`,
+		before,
+	)
+	return wrapErr("DeleteOldLogLines", err)
+}
+
 func (s *SQLiteStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }

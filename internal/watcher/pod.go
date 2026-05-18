@@ -101,8 +101,10 @@ func (h *PodHandler) OnUpdate(oldObj, newObj interface{}) {
 			slog.Warn("failed to update job run node", "runID", runID, "err", err)
 		}
 
-		// Start log streaming.
-		h.streamer.Stream(ctx, h.clientset, namespace, podName, runID)
+		// Only stream if no logs captured yet (prevents duplicates on pod restarts).
+		if run, err := h.store.GetJobRun(ctx, runID); err == nil && run != nil && run.LogSizeBytes == 0 {
+			h.streamer.Stream(ctx, h.clientset, namespace, podName, runID)
+		}
 
 		// Start resource sampling if metrics are enabled for this cluster.
 		if h.metricsEnabled && h.sampler != nil {

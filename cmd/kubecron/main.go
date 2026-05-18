@@ -25,7 +25,8 @@ type Config struct {
 	KubeconfigDir         string `env:"KUBECONFIG_DIR"          envDefault:"/etc/kubecron/kubeconfigs"`
 	DBPath                string `env:"DB_PATH"                 envDefault:"/data/kubecron.db"`
 	Port                  int    `env:"PORT"                    envDefault:"8080"`
-	RetentionDays         int    `env:"RETENTION_DAYS"          envDefault:"7"`
+	RetentionDays         int    `env:"RETENTION_DAYS"          envDefault:"90"`
+	LogRetentionDays      int    `env:"LOG_RETENTION_DAYS"      envDefault:"14"`
 	MetricsSampleInterval int    `env:"METRICS_SAMPLE_INTERVAL" envDefault:"15"` // seconds
 	OIDC                  auth.Config
 }
@@ -54,7 +55,7 @@ func main() {
 	}
 
 	// 4. Background retention goroutine.
-	go storage.StartRetention(ctx, store, cfg.RetentionDays)
+	go storage.StartRetention(ctx, store, cfg.RetentionDays, cfg.LogRetentionDays)
 
 	// 5. Load kubeconfigs → one ClusterClient per file.
 	mgr := cluster.NewManager(store, cfg.KubeconfigDir)

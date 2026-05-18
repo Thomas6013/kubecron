@@ -50,6 +50,7 @@ type Store interface {
 
 	// Maintenance
 	DeleteOldData(ctx context.Context, before time.Time) error
+	DeleteOldLogLines(ctx context.Context, before time.Time) error
 	Ping(ctx context.Context) error
 }
 
