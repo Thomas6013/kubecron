@@ -35,7 +35,9 @@ func htmlHead(title string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>` + esc(title) + ` — KubeCron</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon.png">
 <link rel="stylesheet" href="/static/app.css">
 <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
@@ -115,8 +117,13 @@ const countdownJS = `<script>
     document.querySelectorAll('.countdown[data-ts]').forEach(function(el) {
       var diff = parseInt(el.dataset.ts) - Math.floor(Date.now() / 1000);
       if (diff <= 0) { el.textContent = 'now'; return; }
-      var h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60), s = diff % 60;
-      el.textContent = h > 0 ? h+'h '+m+'m' : m > 0 ? m+'m '+s+'s' : s+'s';
+      var w = Math.floor(diff/604800), d = Math.floor((diff%604800)/86400);
+      var h = Math.floor((diff%86400)/3600), m = Math.floor((diff%3600)/60), s = diff%60;
+      if (w > 0)      el.textContent = d > 0 ? w+'w '+d+'j' : w+'w';
+      else if (d > 0) el.textContent = d+'j '+h+'h';
+      else if (h > 0) el.textContent = h+'h '+m+'m';
+      else if (m > 0) el.textContent = m+'m '+s+'s';
+      else            el.textContent = s+'s';
     });
   }
   update();
