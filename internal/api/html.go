@@ -27,13 +27,22 @@ func fmtDuration(ms int64) string {
 func esc(s string) string { return html.EscapeString(s) }
 
 // htmlHead returns the HTML <head> block + open <body> with nav and toast.
-func htmlHead(title string) string {
+// userEmail is shown in the nav with a logout link when non-empty (OIDC enabled).
+func htmlHead(title, userEmail string) string {
+	navRight := ""
+	if userEmail != "" {
+		navRight = `<div style="margin-left:auto;display:flex;align-items:center;gap:10px;">` +
+			`<span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">` + esc(userEmail) + `</span>` +
+			`<a href="/auth/logout" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);text-decoration:none;border:1px solid var(--border);padding:2px 10px;border-radius:4px;">logout</a>` +
+			`</div>`
+	}
+	_ = title
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>` + esc(title) + ` — KubeCron</title>
+<title>KubeCron</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -45,6 +54,7 @@ func htmlHead(title string) string {
 <nav>
   <a class="logo" href="/"><span style="font-family:var(--font-mono);">[KubeCron]</span></a>
   <a href="/">Clusters</a>
+  ` + navRight + `
 </nav>
 <div id="toast"></div>
 <script>
@@ -65,8 +75,8 @@ document.body.addEventListener('htmx:afterRequest', function(e) {
 
 // htmlHeadSidebar starts a page with a 2-column layout (sidebar + main).
 // sidebarHTML is injected raw into the aside; call htmlFoot to close.
-func htmlHeadSidebar(title, sidebarHTML string) string {
-	return htmlHead(title) + `<div class="page-layout"><aside class="sidebar">` + sidebarHTML + `</aside><div class="page-main">`
+func htmlHeadSidebar(title, sidebarHTML, userEmail string) string {
+	return htmlHead(title, userEmail) + `<div class="page-layout"><aside class="sidebar">` + sidebarHTML + `</aside><div class="page-main">`
 }
 
 // htmlFootSidebar closes a sidebar-layout page.

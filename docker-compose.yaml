@@ -1,26 +1,17 @@
-# KubeCron — dev environment with live reload (air)
+# KubeCron — local dev (même image que la prod)
 #
-# Setup:
-#   1. Place kubeconfig(s) in dev/kubeconfigs/ (e.g. "admin")
-#      ⚠ If using a local cluster (kind/minikube): replace 127.0.0.1 with host.docker.internal
-#   2. docker compose up
+# Usage:
+#   1. Copier un kubeconfig dans dev/kubeconfigs/  (ex: cp ~/.kube/config dev/kubeconfigs/mycluster)
+#      ⚠ kind/minikube : remplacer 127.0.0.1 par host.docker.internal dans le kubeconfig
+#   2. docker compose up --build
+#      → compile + démarre. Relancer la même commande après chaque changement de code.
 #   3. http://localhost:8082
-#
-# Air watches .go/.templ/.css/.sql files and rebuilds + restarts on each change.
-# First start ~2 min (install templ+air + build). Subsequent starts ~5 s thanks to caches.
 
 services:
   kubecron:
     build:
       context: .
-      dockerfile: Dockerfile.dev
-    working_dir: /app
-    command: >
-      sh -c "
-        command -v templ || go install github.com/a-h/templ/cmd/templ@v0.3.1020 &&
-        command -v air   || go install github.com/air-verse/air@latest &&
-        air -c .air.toml
-      "
+      dockerfile: Dockerfile
     ports:
       - "8082:8080"
     environment:
@@ -36,13 +27,8 @@ services:
       OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
       OIDC_SESSION_KEY: ${OIDC_SESSION_KEY:-}
     volumes:
-      - .:/app
       - kubecron-data:/data
       - ./dev/kubeconfigs:/etc/kubecron/kubeconfigs:ro
-      - go-mod-cache:/go/pkg/mod
-      - go-build-cache:/root/.cache/go-build
 
 volumes:
   kubecron-data:
-  go-mod-cache:
-  go-build-cache:

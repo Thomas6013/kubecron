@@ -29,10 +29,21 @@ type Config struct {
 }
 
 const (
-	sessionCookie  = "kubecron_session"
-	stateCookie    = "kubecron_state"
-	sessionTTL     = 24 * time.Hour
+	sessionCookie = "kubecron_session"
+	stateCookie   = "kubecron_state"
+	sessionTTL    = 24 * time.Hour
 )
+
+type ctxKey int
+
+const ctxKeyEmail ctxKey = 0
+
+// EmailFromContext returns the authenticated user's email from the request context.
+// Returns "" when OIDC is disabled or the user is not logged in.
+func EmailFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyEmail).(string)
+	return v
+}
 
 // Authenticator handles OIDC login, callback, logout, and session validation.
 type Authenticator struct {
@@ -86,6 +97,7 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 
 // Middleware returns an http.Handler that checks session cookies.
 // Exempt paths: /healthz, /readyz, /metrics, /auth/*.
+// On success, injects the authenticated user's email into the request context.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
@@ -94,11 +106,17 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		c, err := r.Cookie(sessionCookie)
-		if err != nil || !a.valid(c.Value) {
+		if err != nil {
 			http.Redirect(w, r, "/auth/login?redirect="+r.URL.RequestURI(), http.StatusFound)
 			return
 		}
-		next.ServeHTTP(w, r)
+		sess, ok := a.parse(c.Value)
+		if !ok {
+			http.Redirect(w, r, "/auth/login?redirect="+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxKeyEmail, sess.Email)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -191,26 +209,29 @@ func (a *Authenticator) sign(s session) (string, error) {
 	return payload + "." + sig, nil
 }
 
-// valid verifies the HMAC signature and checks the expiry.
-func (a *Authenticator) valid(cookie string) bool {
+// parse verifies the HMAC signature, checks the expiry, and returns the decoded session.
+func (a *Authenticator) parse(cookie string) (session, bool) {
 	parts := strings.SplitN(cookie, ".", 2)
 	if len(parts) != 2 {
-		return false
+		return session{}, false
 	}
 	mac := hmac.New(sha256.New, a.sessionKey)
 	mac.Write([]byte(parts[0]))
 	if !hmac.Equal([]byte(base64.URLEncoding.EncodeToString(mac.Sum(nil))), []byte(parts[1])) {
-		return false
+		return session{}, false
 	}
 	b, err := base64.URLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return false
+		return session{}, false
 	}
 	var s session
 	if err := json.Unmarshal(b, &s); err != nil {
-		return false
+		return session{}, false
 	}
-	return time.Now().Unix() < s.Expiry
+	if time.Now().Unix() >= s.Expiry {
+		return session{}, false
+	}
+	return s, true
 }
 
 func randStr(n int) string {

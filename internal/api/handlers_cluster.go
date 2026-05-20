@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubecron/kubecron/internal/auth"
 	"github.com/kubecron/kubecron/internal/schedule"
 	"github.com/kubecron/kubecron/internal/storage"
 )
@@ -81,7 +82,7 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHead("Dashboard"))
+	fmt.Fprint(w, htmlHead("Dashboard", auth.EmailFromContext(ctx)))
 	fmt.Fprint(w, `<div class="container">`)
 	fmt.Fprint(w, `<h1 style="font-family:var(--font-mono);color:var(--accent);margin-bottom:1.5rem;">[KubeCron]</h1>`)
 
@@ -187,7 +188,7 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, cronjobs, "")))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, cronjobs, ""), auth.EmailFromContext(ctx)))
 
 	// Breadcrumb + page header inside main area
 	fmt.Fprint(w, `<div class="page-content">`)
@@ -363,7 +364,7 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCronJobs, ns)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCronJobs, ns), auth.EmailFromContext(ctx)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,

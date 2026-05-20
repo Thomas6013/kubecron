@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/kubecron/kubecron/internal/auth"
 )
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), auth.EmailFromContext(ctx)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
@@ -193,7 +195,7 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 	runsURL := "/clusters/" + esc(clusterID) + "/cronjobs/" + esc(ns) + "/" + esc(name) + "/runs"
 
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), auth.EmailFromContext(ctx)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
