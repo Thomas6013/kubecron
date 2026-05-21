@@ -547,6 +547,9 @@ func scanJobRun(r rowScanner) (*JobRun, error) {
 	} else if jr.FinishedAt != nil {
 		// julianday() can't parse Go's RFC3339Nano format; compute in Go.
 		ms := jr.FinishedAt.Sub(jr.StartedAt).Milliseconds()
+		if ms < 0 {
+			ms = 0
+		}
 		jr.DurationMs = &ms
 	}
 	if avgCPU.Valid {

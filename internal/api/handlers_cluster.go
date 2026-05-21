@@ -173,10 +173,12 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No CronJobs found in this cluster.</div>`)
 	} else {
 		for _, g := range groups {
+			pollURL := fmt.Sprintf("/clusters/%s/cronjobs/%s/rows", esc(clusterID), esc(g.Namespace))
 			fmt.Fprintf(w, `<div class="ns-section" id="ns-%s">`, esc(g.Namespace))
 			fmt.Fprintf(w, `<div class="ns-header"><span class="ns-tag">namespace</span><span class="ns-name">%s</span><span class="ns-count">%d cron(s)</span></div>`,
 				esc(g.Namespace), len(g.Rows))
-			fmt.Fprint(w, cronJobTableHeader)
+			fmt.Fprint(w, cronJobTableOpen)
+			fmt.Fprint(w, cronJobTableBodyPoll(pollURL))
 			for _, row := range g.Rows {
 				fmt.Fprint(w, renderCronJobRow(row))
 			}
@@ -229,7 +231,9 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	if len(rows) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No CronJobs in this namespace.</div>`)
 	} else {
-		fmt.Fprint(w, cronJobTableHeader)
+		pollURL := fmt.Sprintf("/clusters/%s/cronjobs/%s/rows", esc(clusterID), esc(ns))
+		fmt.Fprint(w, cronJobTableOpen)
+		fmt.Fprint(w, cronJobTableBodyPoll(pollURL))
 		for _, row := range rows {
 			fmt.Fprint(w, renderCronJobRow(row))
 		}
@@ -272,6 +276,35 @@ func buildNsSidebar(clusterID string, cronjobs []storage.CronJob, activeNS strin
 		fmt.Fprintf(&sb, `<div class="sidebar-stats"><span>%d cron(s)</span><span>%d ns</span></div>`, len(cronjobs), len(entries))
 	}
 	return sb.String()
+}
+
+// NamespaceRows returns only the <tr> rows for a namespace.
+// Called by HTMX polling on the ClusterDetail and NamespaceDetail pages.
+func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("clusterID")
+	ns := r.PathValue("ns")
+	ctx := r.Context()
+
+	allCronJobs, err := h.store.ListCronJobs(ctx, clusterID)
+	if err != nil {
+		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
+		return
+	}
+
+	runningRuns, _ := h.store.GetRunningRuns(ctx)
+	runningCount := make(map[string]int)
+	for _, rr := range runningRuns {
+		runningCount[rr.CronJobID]++
+	}
+
+	now := time.Now()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	for _, cj := range allCronJobs {
+		if cj.Namespace != ns {
+			continue
+		}
+		fmt.Fprint(w, renderCronJobRow(h.buildCronJobRow(ctx, clusterID, cj, runningCount, now)))
+	}
 }
 
 func derefStr(s *string) string {

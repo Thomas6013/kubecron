@@ -66,13 +66,17 @@ func (h *JobHandler) OnAdd(obj interface{}, isInInitialList bool) {
 		return
 	}
 
+	startedAt := time.Now()
+	if job.Status.StartTime != nil {
+		startedAt = job.Status.StartTime.Time
+	}
 	run := storage.JobRun{
 		ID:        runID,
 		CronJobID: cronJobID,
 		PodName:   job.Name,
 		Trigger:   trigger,
 		Status:    "running",
-		StartedAt: time.Now(),
+		StartedAt: startedAt,
 	}
 
 	if err := h.store.UpsertJobRun(ctx, run); err != nil {

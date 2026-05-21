@@ -116,11 +116,19 @@ func actionButtons(clusterID, ns, name string, suspended bool) string {
 	return suspendBtn + triggerBtn
 }
 
-const cronJobTableHeader = `<div class="card" style="padding:0;overflow:hidden;"><table>
+// cronJobTableOpen is the table wrapper + thead, without <tbody>.
+// Use cronJobTableBody or cronJobTableBodyPoll to open the <tbody>.
+const cronJobTableOpen = `<div class="card" style="padding:0;overflow:hidden;"><table>
 <thead><tr>
   <th>Name</th><th>Schedule</th><th>Next run</th>
   <th>Last status</th><th>7d</th><th>Resources</th><th>Actions</th>
-</tr></thead><tbody>`
+</tr></thead>`
+
+// cronJobTableBodyPoll opens a <tbody> that polls the given URL every 10 s for
+// fresh <tr> rows, replacing its content in place via HTMX.
+func cronJobTableBodyPoll(url string) string {
+	return fmt.Sprintf(`<tbody hx-get="%s" hx-trigger="every 10s" hx-swap="innerHTML">`, esc(url))
+}
 
 const runTableHeader = `<div class="card" style="padding:0;overflow:hidden;"><table>
 <thead><tr>
