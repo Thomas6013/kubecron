@@ -47,9 +47,19 @@ func (m *Manager) Load(ctx context.Context) error {
 
 	var files []os.DirEntry
 	for _, e := range entries {
-		if !e.IsDir() {
-			files = append(files, e)
+		if e.IsDir() {
+			continue
 		}
+		name := e.Name()
+		// Skip dotfiles (.gitkeep, .DS_Store, etc.) and non-kubeconfig extensions.
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		ext := filepath.Ext(name)
+		if ext != "" && ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		files = append(files, e)
 	}
 
 	if len(files) == 0 {

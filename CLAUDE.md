@@ -9,12 +9,13 @@ Context file for Claude Code. Covers architecture, commands, conventions, and de
 KubeCron is a **single-binary Go application** that monitors Kubernetes CronJob executions across multiple clusters. It provides live log streaming, run history, resource tracking, and CronJob control (suspend/resume/trigger) via a server-rendered web UI.
 
 - **Language**: Go 1.26, stdlib `net/http` router (Go 1.22+ enhanced routing), `log/slog` structured logging
-- **Templates**: `a-h/templ` v0.3 — type-safe compiled HTML templates (no runtime parsing)
+- **UI rendering**: Raw HTML via `fmt.Fprintf` in `internal/api/html.go` + `html_components.go` — no template engine, no Node.js build step
 - **Database**: SQLite via `modernc.org/sqlite` (pure Go, no CGO, WAL mode, embedded migrations)
 - **Kubernetes**: `k8s.io/client-go` informers (CronJob, Job, Pod), MetricsClient for resource sampling
 - **Frontend**: HTMX 2.x + Tailwind CDN + Chart.js — no Node.js build step
-- **Auth**: OIDC optional (`coreos/go-oidc/v3` + `golang.org/x/oauth2`)
-- **Infra**: Multi-stage Dockerfile → `gcr.io/distroless/static:nonroot`, multi-arch (amd64+arm64), CI with golangci-lint + SBOM + cosign
+- **Auth**: OIDC optional (`coreos/go-oidc/v3` + `golang.org/x/oauth2`); HMAC-signed session cookie, 24 h TTL
+- **Metrics**: Prometheus via `prometheus/client_golang`; 6 wired metrics exposed at `/metrics`
+- **Infra**: Single-stage Dockerfile → `gcr.io/distroless/static:nonroot`, multi-arch (amd64+arm64), CI with golangci-lint + SBOM + cosign
 
 ---
 
@@ -28,11 +29,14 @@ internal/
   api/
     server.go                 # HTTP server setup, route registration
     middleware.go             # Logging, recovery, CORS, auth middleware
-    handlers_cluster.go       # GET /api/clusters
+    handlers_cluster.go       # Dashboard, ClusterDetail, NamespaceDetail pages
     handlers_cronjob.go       # Suspend/resume/trigger endpoints
-    handlers_runs.go          # Run list, stats endpoints
+    handlers_runs.go          # Run list, run detail, SSE stream, log download
     handlers_sse.go           # GET /api/runs/{id}/stream (SSE log streaming)
-    html.go                   # Server-rendered HTML page handlers
+    html.go                   # Shared HTML head/foot, nav, breadcrumb, countdown, statusBadge
+    html_components.go        # Reusable CronJob row, run row, action buttons, table headers
+    html_log.go               # logSearchBar, logSearchJS
+    html_chart.go             # sparklineSVG, heatmapHTML
   auth/
     auth.go                   # OIDC discovery, login/callback/logout, session management
   cluster/
@@ -41,9 +45,11 @@ internal/
     registry.go               # Thread-safe cluster registry
   watcher/
     controller.go             # Per-cluster informer controller
+    controller.go             # Per-cluster informer controller
     cronjob.go                # CronJob informer event handlers
     job.go                    # Job informer event handlers (run tracking)
     pod.go                    # Pod informer event handlers (logs, metrics, status)
+    run_index.go              # Thread-safe jobName→runID map (O(1) lookup for PodHandler)
   streamer/
     logstream.go              # Stream pod logs via client-go
     broadcaster.go            # In-memory pub/sub for SSE (run_id → subscribers)
@@ -56,11 +62,10 @@ internal/
     queries.go                # All SQL operations (upsert, list, update, delete)
     retention.go              # Background cleanup (delete runs older than RETENTION_DAYS)
   metrics/
-    metrics.go                # Prometheus collectors
+    metrics.go                # Prometheus collectors (wired: runs_total, duration, last_status, suspended, next_run)
   schedule/
     next.go                   # Compute next N runs from cron expression
   ui/
-    templates/                # *.templ source files + generated *_templ.go (both committed)
     static/                   # Embedded CSS (app.css)
 
 migrations/                   # SQL files embedded in binary via embed.FS
@@ -76,9 +81,6 @@ dev/kubeconfigs/              # Local dev kubeconfigs (gitignored content, direc
 ## Key Commands
 
 ```bash
-# Generate templ files (required after any *.templ change)
-templ generate
-
 # Build
 go build ./...
 
@@ -152,8 +154,7 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 ### Testing — Medium Priority
 
-- **No unit tests** — storage queries, schedule computation, resource parsing untested. Fix: add table-driven tests.
-- **No integration tests** — informer event handling untested without a real cluster. Fix: fake client-go client.
+- **Partial test coverage** — schedule, auth, storage, broadcaster, watcher (JobHandler) covered. Still missing: HTTP handler integration tests, `go test -race` (requires CGO, run in Linux CI).
 
 ### Security — Low Priority
 
@@ -165,7 +166,7 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 ## Code Conventions
 
 - **No CGO**: always build with `CGO_ENABLED=0`.
-- **templ**: always run `templ generate` after editing `.templ` files. Commit both `*.templ` and `*_templ.go`.
+- **UI rendering**: all HTML is generated in `internal/api/html.go`, `html_components.go`, `html_log.go`, and `html_chart.go` via `fmt.Fprintf`. No template engine. When adding a new UI component, add a helper to `html_components.go` (reusable row/card) or the appropriate thematic file rather than inlining HTML in handlers.
 - **SQL**: all queries in `internal/storage/queries.go`. New tables = new migration file in `migrations/`.
 - **Error handling**: never return raw K8s API or DB errors to HTTP clients. Log with `slog.Error()`, return 500.
 - **Secrets**: never log kubeconfig paths or content, OIDC secrets, or session keys.
@@ -177,7 +178,7 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 ## CI/CD Notes
 
-- `ci.yml` runs on push/PR to `main`: `templ generate`, `go build`, `go vet`, `go test`, `golangci-lint`. Skipped for `renovate[bot]`.
+- `ci.yml` runs on push/PR to `main`: `go build`, `go vet`, `go test`, `golangci-lint`. Skipped for `renovate[bot]`.
 - `docker-publish.yml` builds and pushes to `ghcr.io/thomas6013/kubecron` on `*.*.*` tag push only.
 - Image tags: `latest`, `<git-tag>`, `<commit-sha>`.
 - Multi-arch: `linux/amd64` + `linux/arm64` via QEMU + buildx.
@@ -189,7 +190,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 ## Definition of Done (Release Checklist)
 
 ### Build & quality
-- [ ] `templ generate` — no errors, generated files committed
 - [ ] `go build ./...` — no errors
 - [ ] `go vet ./...` — no warnings
 - [ ] `go test ./...` — all tests pass
@@ -220,6 +220,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
    The `docker-publish.yml` workflow triggers automatically on `*.*.*` tag push.
 
 ### Common pitfalls
-- Forgetting `templ generate` — CI catches it but costs a round-trip
 - Docker images publish **only on tag push** — the tag must exactly match the version bump
 - `helm lint` is now in CI (`helm-lint` job) — run it locally first to avoid a wasted CI run
+- New Prometheus metrics must be wired (incremented/set) in the appropriate watcher or handler — declaring them in `metrics.go` is not enough

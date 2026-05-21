@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/kubecron/kubecron/internal/metrics"
 	"github.com/kubecron/kubecron/internal/sampler"
 	"github.com/kubecron/kubecron/internal/storage"
 	"github.com/kubecron/kubecron/internal/streamer"
@@ -22,6 +23,7 @@ type PodHandler struct {
 	sampler        *sampler.Sampler
 	clientset      kubernetes.Interface
 	metricsEnabled bool
+	runIndex       *RunIndex
 }
 
 // NewPodHandler creates a PodHandler.
@@ -32,6 +34,7 @@ func NewPodHandler(
 	smp *sampler.Sampler,
 	clientset kubernetes.Interface,
 	metricsEnabled bool,
+	idx *RunIndex,
 ) *PodHandler {
 	return &PodHandler{
 		clusterID:      clusterID,
@@ -40,22 +43,47 @@ func NewPodHandler(
 		sampler:        smp,
 		clientset:      clientset,
 		metricsEnabled: metricsEnabled,
+		runIndex:       idx,
 	}
 }
 
-// OnAdd handles pods already in a terminal phase when the informer starts or
-// when a fast-completing pod is seen for the first time in a terminal state.
+// OnAdd handles pods already in Running or terminal phase when the informer
+// starts, or when a fast-completing pod is first seen in a terminal state.
 func (h *PodHandler) OnAdd(obj interface{}, isInInitialList bool) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok {
 		return
 	}
 	phase := pod.Status.Phase
-	if phase != corev1.PodSucceeded && phase != corev1.PodFailed {
+	if phase != corev1.PodRunning && phase != corev1.PodSucceeded && phase != corev1.PodFailed {
+		return
+	}
+	if isInInitialList && phase == corev1.PodRunning {
+		// At startup the Job informer may not have created the run record yet.
+		// Retry in a background goroutine so no logs or samples are missed.
+		go h.retryOnAdd(pod)
 		return
 	}
 	// Delegate to OnUpdate so the full status/log/sampler logic runs.
 	h.OnUpdate(nil, obj)
+}
+
+// retryOnAdd waits for the Job handler to create the run record, then calls
+// OnUpdate. Gives up after 5 s (10 × 500 ms) — by then the run either exists
+// or the informer will fire OnUpdate when the pod transitions to a new phase.
+func (h *PodHandler) retryOnAdd(pod *corev1.Pod) {
+	jobName, found := jobOwner(pod)
+	if !found {
+		return
+	}
+	ctx := context.Background()
+	for range 10 {
+		if h.findRunID(ctx, jobName) != "" {
+			h.OnUpdate(nil, pod)
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // OnUpdate handles pod phase transitions.
@@ -137,6 +165,11 @@ func (h *PodHandler) OnUpdate(oldObj, newObj interface{}) {
 			slog.Warn("failed to update job run status", "runID", runID, "status", status, "err", err)
 		}
 
+		// Record Prometheus metrics for this run completion.
+		if run, err := h.store.GetJobRun(ctx, runID); err == nil && run != nil {
+			metrics.RecordCompletion(h.clusterID, run.CronJobID, status, run.Trigger, run.StartedAt, finishedAt)
+		}
+
 		// Stream logs for fast-completing pods whose PodRunning event was missed.
 		// Only fetch if no logs have been captured yet to avoid duplicates.
 		if run, err := h.store.GetJobRun(ctx, runID); err == nil && run != nil && run.LogSizeBytes == 0 {
@@ -147,12 +180,19 @@ func (h *PodHandler) OnUpdate(oldObj, newObj interface{}) {
 		if h.sampler != nil {
 			h.sampler.Stop(runID)
 		}
+
+		// Remove the completed job from the index so we don't hold stale entries.
+		h.runIndex.Delete(jobName)
 	}
 }
 
-// findRunID looks through currently running runs for one whose pod_name matches
-// jobName. Returns the run ID or an empty string if not found.
+// findRunID returns the run ID for the given Kubernetes Job name, checking the
+// in-memory RunIndex first (O(1)) before falling back to a DB scan (for runs
+// that were already running when kubecron started).
 func (h *PodHandler) findRunID(ctx context.Context, jobName string) string {
+	if id := h.runIndex.Get(jobName); id != "" {
+		return id
+	}
 	runs, err := h.store.GetRunningRuns(ctx)
 	if err != nil {
 		slog.Warn("failed to fetch running runs", "err", err)

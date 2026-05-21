@@ -9,6 +9,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/kubecron/kubecron/internal/metrics"
+	"github.com/kubecron/kubecron/internal/schedule"
 	"github.com/kubecron/kubecron/internal/storage"
 )
 
@@ -81,6 +83,17 @@ func (h *CronJobHandler) upsert(cj *batchv1.CronJob) {
 	ctx := context.Background()
 	if err := h.store.UpsertCronJob(ctx, record); err != nil {
 		slog.Error("failed to upsert cronjob", "cluster", h.clusterID, "namespace", namespace, "name", name, "err", err)
+	}
+
+	// Update Prometheus gauges on every CronJob add/update.
+	suspendedVal := 0.0
+	if record.Suspended {
+		suspendedVal = 1.0
+	}
+	metrics.CronJobSuspended.WithLabelValues(h.clusterID, namespace, name).Set(suspendedVal)
+
+	if nextRun, err := schedule.NextRun(cj.Spec.Schedule, time.Now()); err == nil {
+		metrics.NextRunTimestamp.WithLabelValues(h.clusterID, namespace, name).Set(float64(nextRun.Unix()))
 	}
 }
 

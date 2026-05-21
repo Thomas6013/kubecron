@@ -24,15 +24,17 @@ type JobHandler struct {
 	store     storage.Store
 	clientset kubernetes.Interface
 	streamer  *streamer.Streamer
+	runIndex  *RunIndex
 }
 
 // NewJobHandler creates a handler for the given cluster.
-func NewJobHandler(clusterID string, store storage.Store, clientset kubernetes.Interface, str *streamer.Streamer) *JobHandler {
+func NewJobHandler(clusterID string, store storage.Store, clientset kubernetes.Interface, str *streamer.Streamer, idx *RunIndex) *JobHandler {
 	return &JobHandler{
 		clusterID: clusterID,
 		store:     store,
 		clientset: clientset,
 		streamer:  str,
+		runIndex:  idx,
 	}
 }
 
@@ -81,17 +83,24 @@ func (h *JobHandler) OnAdd(obj interface{}, isInInitialList bool) {
 			"err", err,
 		)
 	}
+	h.runIndex.Set(job.Name, runID)
 }
 
 // backfillRun creates a historical run record for a Job that completed before
 // (or during) kubecron startup, and attempts to recover logs from the pod.
 func (h *JobHandler) backfillRun(ctx context.Context, job *batchv1.Job, namespace, cronJobID, trigger, runID string) {
-	// If the run is already correctly marked as succeeded, leave it.
-	// A 'failed' status here may have been set by the startup cleanup (which uses
-	// exit_code=-1 as sentinel); in that case we overwrite with the true K8s status.
-	if existing, err := h.store.GetJobRun(ctx, runID); err == nil && existing != nil && existing.Status == "succeeded" {
-		return
+	// Check existing run state up front so we can avoid duplicate log streaming.
+	existing, _ := h.store.GetJobRun(ctx, runID)
+	if existing != nil {
+		// Already correctly backfilled — nothing to do.
+		if existing.Status == "succeeded" {
+			return
+		}
+		// A 'failed' status here may have been set by the startup cleanup (exit_code=-1
+		// sentinel); fall through to overwrite with the true K8s status, but remember
+		// whether logs were already captured so we don't stream them a second time.
 	}
+	alreadyHasLogs := existing != nil && existing.LogSizeBytes > 0
 
 	status := "failed"
 	for _, c := range job.Status.Conditions {
@@ -140,7 +149,7 @@ func (h *JobHandler) backfillRun(ctx context.Context, job *batchv1.Job, namespac
 	if err != nil || len(pods.Items) == 0 {
 		return
 	}
-	pod := &pods.Items[0]
+	pod := selectBestPod(pods.Items)
 
 	nodeName := pod.Spec.NodeName
 	image := ""
@@ -163,8 +172,9 @@ func (h *JobHandler) backfillRun(ctx context.Context, job *batchv1.Job, namespac
 		slog.Warn("backfill: failed to update exit code", "job", job.Name, "err", err)
 	}
 
-	// Stream logs if the pod still has them.
-	if h.streamer != nil {
+	// Stream logs only if none have been captured yet — prevents duplicate log
+	// entries when the informer re-lists on reconnect or kubecron restarts.
+	if !alreadyHasLogs && h.streamer != nil {
 		h.streamer.Stream(ctx, h.clientset, namespace, pod.Name, runID)
 	}
 }
@@ -183,11 +193,38 @@ func (h *JobHandler) OnDelete(obj interface{}) {
 	ctx := context.Background()
 	existing, err := h.store.GetJobRun(ctx, runID)
 	if err != nil || existing == nil || existing.Status != "running" {
+		h.runIndex.Delete(job.Name)
 		return
 	}
 	if err := h.store.MarkRunFailed(ctx, runID); err != nil {
 		slog.Warn("failed to mark deleted job run as failed", "job", job.Name, "err", err)
 	}
+	h.runIndex.Delete(job.Name)
+}
+
+// selectBestPod returns the most relevant pod for log/status recovery:
+// prefers the most recently created terminal pod; falls back to the newest pod.
+func selectBestPod(pods []corev1.Pod) *corev1.Pod {
+	var best *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+			continue
+		}
+		if best == nil || p.CreationTimestamp.After(best.CreationTimestamp.Time) {
+			best = p
+		}
+	}
+	if best != nil {
+		return best
+	}
+	for i := range pods {
+		p := &pods[i]
+		if best == nil || p.CreationTimestamp.After(best.CreationTimestamp.Time) {
+			best = p
+		}
+	}
+	return best
 }
 
 // jobIsDone returns true if the Job has fully completed (succeeded or failed).

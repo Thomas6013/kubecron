@@ -39,8 +39,8 @@ Items are not committed to any timeline — this is a solo side project.
 
 - [x] **golangci-lint in CI** _(v0.0.1)_
 - [x] **helm lint in CI** _(v0.0.1)_
-- [ ] **Unit tests** — resource parsing, schedule computation, storage queries
-- [ ] **Integration tests** — informer event handling with fake client
+- [x] **Unit tests (partial)** — schedule, auth HMAC, storage, broadcaster, watcher (JobHandler) covered _(unreleased)_; HTTP handler integration tests still pending
+- [ ] **Integration tests** — informer event handling with `k8s.io/client-go/kubernetes/fake`
 - [ ] **Renovate** — automated dependency updates for Go modules and GitHub Actions
 - [ ] **seccompProfile: RuntimeDefault** — add to pod security context in k8s/ and Helm chart
 

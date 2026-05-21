@@ -1,0 +1,92 @@
+package auth
+
+import (
+	"testing"
+	"time"
+)
+
+func newTestAuth() *Authenticator {
+	return &Authenticator{
+		sessionKey: []byte("test-key-that-is-exactly-32-bytes"),
+	}
+}
+
+func TestSignAndParse_RoundTrip(t *testing.T) {
+	a := newTestAuth()
+	sess := session{
+		Subject: "sub123",
+		Email:   "user@example.com",
+		Expiry:  time.Now().Add(time.Hour).Unix(),
+	}
+	token, err := a.sign(sess)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	got, ok := a.parse(token)
+	if !ok {
+		t.Fatal("parse: expected ok=true")
+	}
+	if got.Email != sess.Email {
+		t.Errorf("email: got %q, want %q", got.Email, sess.Email)
+	}
+	if got.Subject != sess.Subject {
+		t.Errorf("subject: got %q, want %q", got.Subject, sess.Subject)
+	}
+}
+
+func TestParse_ExpiredSession(t *testing.T) {
+	a := newTestAuth()
+	sess := session{
+		Subject: "sub123",
+		Email:   "user@example.com",
+		Expiry:  time.Now().Add(-time.Hour).Unix(), // already expired
+	}
+	token, err := a.sign(sess)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, ok := a.parse(token); ok {
+		t.Error("parse: expected ok=false for expired session")
+	}
+}
+
+func TestParse_TamperedPayload(t *testing.T) {
+	a := newTestAuth()
+	sess := session{Subject: "x", Email: "x@x.com", Expiry: time.Now().Add(time.Hour).Unix()}
+	token, _ := a.sign(sess)
+	// Prepend junk to the payload (before the dot).
+	if _, ok := a.parse("tampered." + token); ok {
+		t.Error("parse: expected ok=false for tampered payload")
+	}
+}
+
+func TestParse_WrongKey(t *testing.T) {
+	a1 := &Authenticator{sessionKey: []byte("key-a-32-bytes-long-padding-here!")}
+	a2 := &Authenticator{sessionKey: []byte("key-b-32-bytes-long-padding-here!")}
+	sess := session{Subject: "x", Email: "x@x.com", Expiry: time.Now().Add(time.Hour).Unix()}
+	token, _ := a1.sign(sess)
+	if _, ok := a2.parse(token); ok {
+		t.Error("parse: expected ok=false when signed with a different key")
+	}
+}
+
+func TestSafeRedirect(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"/dashboard", "/dashboard"},
+		{"/clusters/foo/bar", "/clusters/foo/bar"},
+		{"//evil.com", "/"},          // protocol-relative URL
+		{"https://evil.com", "/"},    // absolute HTTPS
+		{"http://evil.com/steal", "/"}, // absolute HTTP
+		{"javascript:alert(1)", "/"}, // JS injection
+		{"", "/"},                    // empty falls back
+	}
+	for _, tc := range tests {
+		got := safeRedirect(tc.raw, "/")
+		if got != tc.want {
+			t.Errorf("safeRedirect(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}

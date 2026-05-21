@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -56,11 +57,15 @@ func (s *Server) Start(port int) error {
 	// Static assets (CSS, fonts fallback)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static.FS))))
 
+	loginLimiter := RateLimit(10, time.Minute)
+	triggerLimiter := RateLimit(20, time.Minute)
+
 	// Auth routes
 	if s.authenticator != nil {
-		mux.HandleFunc("GET /auth/login", s.authenticator.HandleLogin)
+		mux.Handle("GET /auth/login", loginLimiter(http.HandlerFunc(s.authenticator.HandleLogin)))
 		mux.HandleFunc("GET /auth/callback", s.authenticator.HandleCallback)
 		mux.HandleFunc("GET /auth/logout", s.authenticator.HandleLogout)
+		mux.HandleFunc("GET /auth/logged-out", s.authenticator.HandleLoggedOut)
 	}
 
 	// API — JSON
@@ -72,7 +77,7 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /api/runs/{id}/logs.txt", h.DownloadLogs)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/suspend", h.Suspend)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume", h.Resume)
-	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", h.Trigger)
+	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", triggerLimiter(http.HandlerFunc(h.Trigger)))
 
 	// Observability
 	mux.Handle("GET /metrics", promhttp.Handler())
@@ -87,7 +92,7 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /", h.Dashboard)
 
 	// Build middleware chain; prepend OIDC middleware if enabled.
-	middlewares := []func(http.Handler) http.Handler{Logger, Recover, CORS}
+	middlewares := []func(http.Handler) http.Handler{Logger, Recover, EnsureCSRFCookie, CSRFProtect}
 	if s.authenticator != nil {
 		middlewares = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, middlewares...)
 	}

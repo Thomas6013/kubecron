@@ -114,7 +114,7 @@ func patchSuspend(ctx context.Context, h *Handler, r *http.Request, suspend bool
 
 	cl, ok := h.registry.Get(clusterID)
 	if !ok {
-		return errorf("cluster %q not found", clusterID)
+		return fmt.Errorf("cluster %q not found", clusterID)
 	}
 
 	suspendValue := "true"
@@ -192,11 +192,3 @@ func (h *Handler) Trigger(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// errorf is a tiny helper to build an error from a format string.
-func errorf(format string, args ...interface{}) error {
-	return &stringError{msg: fmt.Sprintf(format, args...)}
-}
-
-type stringError struct{ msg string }
-
-func (e *stringError) Error() string { return e.msg }

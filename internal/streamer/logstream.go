@@ -30,8 +30,8 @@ func cleanLine(s string) string {
 }
 
 const (
-	flushInterval = 100 * time.Millisecond
-	flushMaxLines = 50
+	flushInterval = 200 * time.Millisecond
+	flushMaxLines = 200
 )
 
 // Streamer streams pod logs to the store and broadcasts them to live subscribers.

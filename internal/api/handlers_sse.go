@@ -94,8 +94,9 @@ func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	// Send current status immediately so the client can initialise its UI.
 	writeStatusEvent(w, flusher, run)
 
+	const sseLogLimit = 5000
 	if run.Status != "running" {
-		lines, _ := h.store.GetLogLines(ctx, id)
+		lines, _ := h.store.GetLogLinesTail(ctx, id, sseLogLimit)
 		for _, l := range lines {
 			esc := html.EscapeString(l.Line)
 			fmt.Fprintf(w, "data: <div class=\"ll\" data-raw=\"%s\">%s</div>\n\n", esc, esc)
@@ -109,10 +110,11 @@ func (h *Handler) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	ch, unsub := h.broadcaster.Subscribe(id)
 	defer unsub()
 
-	// Replay all lines already persisted to DB.
-	hist, _ := h.store.GetLogLines(ctx, id)
+	// Replay the most recent lines already persisted to DB.
+	hist, _ := h.store.GetLogLinesTail(ctx, id, sseLogLimit)
 	for _, l := range hist {
-		fmt.Fprintf(w, "data: %s\n\n", l.Line)
+		esc := html.EscapeString(l.Line)
+		fmt.Fprintf(w, "data: <div class=\"ll\" data-raw=\"%s\">%s</div>\n\n", esc, esc)
 	}
 	flusher.Flush()
 

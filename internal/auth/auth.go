@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -51,6 +52,7 @@ type Authenticator struct {
 	verifier   *oidc.IDTokenVerifier
 	oauth2Cfg  oauth2.Config
 	sessionKey []byte
+	secure     bool // true when RedirectURL uses https — sets Secure flag on cookies
 }
 
 // session is stored in the signed cookie.
@@ -75,6 +77,7 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 		derived := sha256.Sum256([]byte(cfg.SessionKey))
 		sessKey = derived[:]
 	} else {
+		slog.Warn("OIDC_SESSION_KEY is not set: a random key is generated; all sessions are invalidated on restart")
 		sessKey = make([]byte, 32)
 		if _, err := rand.Read(sessKey); err != nil {
 			return nil, fmt.Errorf("auth: generate session key: %w", err)
@@ -92,6 +95,7 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
 		sessionKey: sessKey,
+		secure:     strings.HasPrefix(cfg.RedirectURL, "https://"),
 	}, nil
 }
 
@@ -125,12 +129,10 @@ func (a *Authenticator) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	state := randStr(16)
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: state, Path: "/auth/callback",
-		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		MaxAge: 600, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secure,
 	})
-	redirect := r.URL.Query().Get("redirect")
-	if redirect == "" {
-		redirect = "/"
-	}
+	// Validate redirect to prevent open redirect attacks.
+	redirect := safeRedirect(r.URL.Query().Get("redirect"), "/")
 	// Embed redirect target inside state so it survives the round-trip.
 	stateVal := state + ":" + base64.URLEncoding.EncodeToString([]byte(redirect))
 	http.Redirect(w, r, a.oauth2Cfg.AuthCodeURL(stateVal), http.StatusFound)
@@ -150,7 +152,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	redirect := "/"
 	if dec, err := base64.URLEncoding.DecodeString(parts[1]); err == nil {
-		redirect = string(dec)
+		redirect = safeRedirect(string(dec), "/")
 	}
 	http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: "", MaxAge: -1, Path: "/auth/callback"})
 
@@ -185,15 +187,45 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: signed, Path: "/",
-		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secure,
 	})
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
-// HandleLogout clears the session cookie.
+// HandleLogout clears the session cookie and shows the logged-out page.
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", MaxAge: -1, Path: "/"})
-	http.Redirect(w, r, "/", http.StatusFound)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", MaxAge: -1, Path: "/", Secure: a.secure})
+	http.Redirect(w, r, "/auth/logged-out", http.StatusFound)
+}
+
+// HandleLoggedOut renders a simple page with a login button.
+// Exempt from auth middleware so users can reach it after logout.
+func (a *Authenticator) HandleLoggedOut(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KubeCron</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<nav>
+  <a class="logo" href="/auth/logged-out"><span style="font-family:var(--font-mono);">[KubeCron]</span></a>
+</nav>
+<div style="display:flex;align-items:center;justify-content:center;min-height:70vh;">
+  <div class="card" style="text-align:center;padding:3rem 4rem;max-width:380px;width:100%;">
+    <div style="font-family:var(--font-mono);color:var(--accent);font-size:1.4rem;margin-bottom:.5rem;">[KubeCron]</div>
+    <div style="color:var(--muted);font-family:var(--font-mono);font-size:0.85rem;margin-bottom:2rem;">You have been logged out.</div>
+    <a href="/auth/login" style="display:inline-block;font-family:var(--font-mono);font-size:0.9rem;color:var(--bg);background:var(--accent);border:none;padding:.6rem 2rem;border-radius:6px;text-decoration:none;cursor:pointer;">Login</a>
+  </div>
+</div>
+</body>
+</html>`))
 }
 
 // sign serialises a session and appends an HMAC-SHA256 signature.
@@ -232,6 +264,15 @@ func (a *Authenticator) parse(cookie string) (session, bool) {
 		return session{}, false
 	}
 	return s, true
+}
+
+// safeRedirect returns raw if it is a safe same-origin relative path,
+// or fallback otherwise. Prevents open redirect attacks.
+func safeRedirect(raw, fallback string) string {
+	if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
+		return raw
+	}
+	return fallback
 }
 
 func randStr(n int) string {

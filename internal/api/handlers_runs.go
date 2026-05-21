@@ -114,49 +114,9 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	if len(runs) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No runs yet.</div>`)
 	} else {
-		fmt.Fprint(w, `<div class="card" style="padding:0;overflow:hidden;"><table>
-<thead><tr>
-  <th>ID</th><th>Trigger</th><th>Status</th>
-  <th>Started</th><th>Duration</th><th>Exit code</th><th>Node</th>
-</tr></thead><tbody>`)
-
+		fmt.Fprint(w, runTableHeader)
 		for _, run := range runs {
-			shortID := run.ID
-			if len(shortID) > 8 {
-				shortID = shortID[:8]
-			}
-			duration := `<span style="color:var(--muted);">—</span>`
-			if run.DurationMs != nil {
-				duration = fmt.Sprintf(`<span style="font-family:var(--font-mono);">%s</span>`, fmtDuration(*run.DurationMs))
-			}
-			exitCode := `<span style="color:var(--muted);">—</span>`
-			if run.ExitCode != nil {
-				color := "var(--accent)"
-				if *run.ExitCode != 0 {
-					color = "var(--red)"
-				}
-				exitCode = fmt.Sprintf(`<span style="font-family:var(--font-mono);color:%s;">%d</span>`, color, *run.ExitCode)
-			}
-			trigger := `<span class="badge" style="border:1px solid var(--border);color:var(--muted);">scheduled</span>`
-			if run.Trigger == "manual" {
-				trigger = `<span class="badge" style="border:1px solid var(--accent);color:var(--accent);">manual</span>`
-			}
-			fmt.Fprintf(w, `<tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs/%s'">
-  <td><code style="color:var(--accent);">%s…</code></td>
-  <td>%s</td>
-  <td>%s</td>
-  <td style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">%s</td>
-  <td>%s</td>
-  <td>%s</td>
-  <td style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">%s</td>
-</tr>`,
-				esc(clusterID), esc(ns), esc(name), esc(run.ID), esc(shortID),
-				trigger,
-				statusBadge(run.Status),
-				esc(run.StartedAt.Format("2006-01-02 15:04:05")),
-				duration, exitCode,
-				esc(derefStr(run.NodeName)),
-			)
+			fmt.Fprint(w, renderRunRow(run, clusterID, ns, name))
 		}
 		fmt.Fprint(w, `</tbody></table></div>`)
 	}
@@ -357,7 +317,11 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 })();
 </script>`, esc(id))
 	} else {
-		lines, _ := h.store.GetLogLines(ctx, id)
+		const logLimit = 5000
+		lines, _ := h.store.GetLogLinesTail(ctx, id, logLimit)
+		if len(lines) == logLimit {
+			fmt.Fprintf(w, `<div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--yellow);margin-bottom:6px;">⚠ showing last %d lines — <a href="/api/runs/%s/logs.txt" style="color:var(--accent);">download full log</a></div>`, logLimit, esc(id))
+		}
 		fmt.Fprint(w, `<div id="log-term" class="log-terminal">`)
 		for _, l := range lines {
 			fmt.Fprintf(w, `<div class="ll" data-raw="%s">%s</div>`, esc(l.Line), esc(l.Line))

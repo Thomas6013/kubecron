@@ -110,7 +110,7 @@ func (s *SQLiteStore) GetCronJobByName(ctx context.Context, clusterID, namespace
 		FROM cronjobs WHERE cluster_id = ? AND namespace = ? AND name = ?`,
 		clusterID, namespace, name,
 	)
-	cj, err := scanCronJobRow(row)
+	cj, err := scanCronJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -121,23 +121,32 @@ func (s *SQLiteStore) GetCronJobByName(ctx context.Context, clusterID, namespace
 // JobRun
 // ---------------------------------------------------------------------------
 
+// jobRunCols is the canonical SELECT column list for job_runs, shared by all
+// queries that need to scan a full JobRun row.
+const jobRunCols = `id, cronjob_id, pod_name, node_name, container_image,
+	       trigger, started_at, finished_at, status, exit_code,
+	       retry_count, log_size_bytes, duration_ms,
+	       avg_cpu_millicores, max_cpu_millicores,
+	       avg_memory_bytes, max_memory_bytes`
+
 func (s *SQLiteStore) UpsertJobRun(ctx context.Context, r JobRun) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO job_runs(id, cronjob_id, pod_name, trigger, started_at, status)
-		VALUES (?,?,?,?,?,?)`,
+		INSERT INTO job_runs(id, cronjob_id, pod_name, trigger, started_at, status)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+		    cronjob_id = excluded.cronjob_id,
+		    pod_name   = excluded.pod_name,
+		    trigger    = excluded.trigger,
+		    started_at = excluded.started_at,
+		    status     = excluded.status`,
 		r.ID, r.CronJobID, r.PodName, r.Trigger, r.StartedAt, r.Status,
 	)
 	return wrapErr("UpsertJobRun", err)
 }
 
 func (s *SQLiteStore) GetJobRun(ctx context.Context, id string) (*JobRun, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, cronjob_id, pod_name, node_name, container_image,
-		       trigger, started_at, finished_at, status, exit_code,
-		       retry_count, log_size_bytes, duration_ms,
-		       avg_cpu_millicores, max_cpu_millicores,
-		       avg_memory_bytes, max_memory_bytes
-		FROM job_runs WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+jobRunCols+` FROM job_runs WHERE id = ?`, id)
 	r, err := scanJobRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -146,13 +155,8 @@ func (s *SQLiteStore) GetJobRun(ctx context.Context, id string) (*JobRun, error)
 }
 
 func (s *SQLiteStore) ListJobRuns(ctx context.Context, cronjobID string) ([]JobRun, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, cronjob_id, pod_name, node_name, container_image,
-		       trigger, started_at, finished_at, status, exit_code,
-		       retry_count, log_size_bytes, duration_ms,
-		       avg_cpu_millicores, max_cpu_millicores,
-		       avg_memory_bytes, max_memory_bytes
-		FROM job_runs WHERE cronjob_id = ? ORDER BY started_at DESC`,
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? ORDER BY started_at DESC`,
 		cronjobID,
 	)
 	if err != nil {
@@ -162,7 +166,7 @@ func (s *SQLiteStore) ListJobRuns(ctx context.Context, cronjobID string) ([]JobR
 
 	var out []JobRun
 	for rows.Next() {
-		r, err := scanJobRunRows(rows)
+		r, err := scanJobRun(rows)
 		if err != nil {
 			return nil, wrapErr("ListJobRuns scan", err)
 		}
@@ -172,14 +176,8 @@ func (s *SQLiteStore) ListJobRuns(ctx context.Context, cronjobID string) ([]JobR
 }
 
 func (s *SQLiteStore) GetLastJobRun(ctx context.Context, cronjobID string) (*JobRun, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, cronjob_id, pod_name, node_name, container_image,
-		       trigger, started_at, finished_at, status, exit_code,
-		       retry_count, log_size_bytes, duration_ms,
-		       avg_cpu_millicores, max_cpu_millicores,
-		       avg_memory_bytes, max_memory_bytes
-		FROM job_runs WHERE cronjob_id = ?
-		ORDER BY started_at DESC LIMIT 1`,
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? ORDER BY started_at DESC LIMIT 1`,
 		cronjobID,
 	)
 	r, err := scanJobRun(row)
@@ -295,13 +293,8 @@ func (s *SQLiteStore) UpdateJobRunNode(ctx context.Context, id, nodeName, contai
 }
 
 func (s *SQLiteStore) GetRunningRuns(ctx context.Context) ([]JobRun, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, cronjob_id, pod_name, node_name, container_image,
-		       trigger, started_at, finished_at, status, exit_code,
-		       retry_count, log_size_bytes, duration_ms,
-		       avg_cpu_millicores, max_cpu_millicores,
-		       avg_memory_bytes, max_memory_bytes
-		FROM job_runs WHERE status = 'running'`,
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+jobRunCols+` FROM job_runs WHERE status = 'running'`,
 	)
 	if err != nil {
 		return nil, wrapErr("GetRunningRuns", err)
@@ -310,7 +303,7 @@ func (s *SQLiteStore) GetRunningRuns(ctx context.Context) ([]JobRun, error) {
 
 	var out []JobRun
 	for rows.Next() {
-		r, err := scanJobRunRows(rows)
+		r, err := scanJobRun(rows)
 		if err != nil {
 			return nil, wrapErr("GetRunningRuns scan", err)
 		}
@@ -405,6 +398,34 @@ func (s *SQLiteStore) GetLogLines(ctx context.Context, runID string) ([]LogLine,
 }
 
 
+func (s *SQLiteStore) GetLogLinesTail(ctx context.Context, runID string, limit int) ([]LogLine, error) {
+	if limit <= 0 {
+		return s.GetLogLines(ctx, runID)
+	}
+	// Fetch the last `limit` lines via a DESC subquery, then re-order ASC so the
+	// caller always receives lines in chronological order.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, run_id, ts, line FROM (
+			SELECT id, run_id, ts, line FROM log_lines WHERE run_id = ? ORDER BY id DESC LIMIT ?
+		) ORDER BY id ASC`,
+		runID, limit,
+	)
+	if err != nil {
+		return nil, wrapErr("GetLogLinesTail", err)
+	}
+	defer rows.Close()
+
+	var out []LogLine
+	for rows.Next() {
+		var l LogLine
+		if err := rows.Scan(&l.ID, &l.RunID, &l.Ts, &l.Line); err != nil {
+			return nil, wrapErr("GetLogLinesTail scan", err)
+		}
+		out = append(out, l)
+	}
+	return out, wrapErr("GetLogLinesTail rows", rows.Err())
+}
+
 // ---------------------------------------------------------------------------
 // Resource samples
 // ---------------------------------------------------------------------------
@@ -489,10 +510,6 @@ func scanCronJob(s rowScanner) (*CronJob, error) {
 	return &cj, nil
 }
 
-func scanCronJobRow(r *sql.Row) (*CronJob, error) {
-	return scanCronJob(r)
-}
-
 func scanJobRun(r rowScanner) (*JobRun, error) {
 	var jr JobRun
 	var nodeName, containerImage sql.NullString
@@ -545,10 +562,6 @@ func scanJobRun(r rowScanner) (*JobRun, error) {
 		jr.MaxMemoryBytes = &maxMem.Int64
 	}
 	return &jr, nil
-}
-
-func scanJobRunRows(rows *sql.Rows) (*JobRun, error) {
-	return scanJobRun(rows)
 }
 
 // ---------------------------------------------------------------------------

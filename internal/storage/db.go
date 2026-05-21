@@ -43,6 +43,9 @@ type Store interface {
 	// Log line operations
 	BatchInsertLogLines(ctx context.Context, runID string, lines []string) error
 	GetLogLines(ctx context.Context, runID string) ([]LogLine, error)
+	// GetLogLinesTail returns the last `limit` lines ordered oldest-first.
+	// If limit <= 0 all lines are returned (equivalent to GetLogLines).
+	GetLogLinesTail(ctx context.Context, runID string, limit int) ([]LogLine, error)
 
 	// Resource sample operations
 	InsertResourceSample(ctx context.Context, runID string, cpuMillicores, memoryBytes int64) error
@@ -76,8 +79,17 @@ func Open(path string) (Store, error) {
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
 		return nil, fmt.Errorf("storage: set WAL mode: %w", err)
 	}
+	// NORMAL is safe with WAL: only the last committed transaction can be lost on
+	// OS crash (not DB corruption). Avoids the extra fsync that FULL requires.
+	if _, err = db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		return nil, fmt.Errorf("storage: set synchronous: %w", err)
+	}
 	if _, err = db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
 		return nil, fmt.Errorf("storage: set busy_timeout: %w", err)
+	}
+	// 64 MB page cache — reduces repeated I/O for hot tables (log_lines, job_runs).
+	if _, err = db.Exec(`PRAGMA cache_size=-65536`); err != nil {
+		return nil, fmt.Errorf("storage: set cache_size: %w", err)
 	}
 	// Enforce foreign key constraints (off by default in SQLite).
 	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {

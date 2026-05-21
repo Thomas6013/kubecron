@@ -57,8 +57,10 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 
 	// ── Job informer ──────────────────────────────────────────────────────────
+	runIndex := NewRunIndex()
+
 	jobInformer := factory.Batch().V1().Jobs().Informer()
-	jobHandler := NewJobHandler(c.clusterID, c.store, c.client.Clientset, c.streamerInst)
+	jobHandler := NewJobHandler(c.clusterID, c.store, c.client.Clientset, c.streamerInst, runIndex)
 	if _, err := jobInformer.AddEventHandler(cache.ResourceEventHandlerDetailedFuncs{
 		AddFunc:    jobHandler.OnAdd,
 		UpdateFunc: jobHandler.OnUpdate,
@@ -76,6 +78,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		c.samplerInst,
 		c.client.Clientset,
 		c.client.MetricsEnabled,
+		runIndex,
 	)
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerDetailedFuncs{
 		AddFunc:    podHandler.OnAdd,

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -136,22 +137,11 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type row struct {
-		storage.CronJob
-		NextRun      time.Time
-		LastRun      *storage.JobRun
-		Stats7d      *storage.RunStats
-		Durations    []int64
-		IsMissed     bool
-		IsConcurrent bool
-	}
-
 	type nsGroup struct {
 		Namespace string
-		Rows      []row
+		Rows      []cronJobRowData
 	}
 
-	// Precompute running counts from GetRunningRuns.
 	runningRuns, _ := h.store.GetRunningRuns(ctx)
 	runningCount := make(map[string]int)
 	for _, rr := range runningRuns {
@@ -159,38 +149,20 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-
-	// ListCronJobs returns rows ordered by namespace, name — preserve that order.
 	var groups []nsGroup
 	nsIdx := map[string]int{}
 	for _, cj := range cronjobs {
-		r := row{CronJob: cj}
-		r.NextRun, _ = schedule.NextRun(cj.Schedule, now)
-		r.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
-		r.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
-		r.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
-		r.IsConcurrent = runningCount[cj.ID] > 1
-		if !cj.Suspended {
-			if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
-				if now.Sub(prev) > 5*time.Minute {
-					if r.LastRun == nil || (r.LastRun.Status != "running" && r.LastRun.StartedAt.Before(prev)) {
-						r.IsMissed = true
-					}
-				}
-			}
-		}
+		row := h.buildCronJobRow(ctx, clusterID, cj, runningCount, now)
 		if _, ok := nsIdx[cj.Namespace]; !ok {
 			nsIdx[cj.Namespace] = len(groups)
 			groups = append(groups, nsGroup{Namespace: cj.Namespace})
 		}
 		i := nsIdx[cj.Namespace]
-		groups[i].Rows = append(groups[i].Rows, r)
+		groups[i].Rows = append(groups[i].Rows, row)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, cronjobs, ""), auth.EmailFromContext(ctx)))
-
-	// Breadcrumb + page header inside main area
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
@@ -204,112 +176,21 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `<div class="ns-section" id="ns-%s">`, esc(g.Namespace))
 			fmt.Fprintf(w, `<div class="ns-header"><span class="ns-tag">namespace</span><span class="ns-name">%s</span><span class="ns-count">%d cron(s)</span></div>`,
 				esc(g.Namespace), len(g.Rows))
-
-			fmt.Fprint(w, `<div class="card" style="padding:0;overflow:hidden;"><table>
-<thead><tr>
-  <th>Name</th><th>Schedule</th><th>Next run</th>
-  <th>Last status</th><th>7d</th><th>Resources</th><th>Actions</th>
-</tr></thead><tbody>`)
-
+			fmt.Fprint(w, cronJobTableHeader)
 			for _, row := range g.Rows {
-				lastStatus := `<span style="color:var(--muted);">—</span>`
-				if row.LastRun != nil {
-					lastStatus = statusBadge(row.LastRun.Status)
-				}
-				if row.IsConcurrent {
-					lastStatus += ` <span class="badge" style="border-color:rgba(236,201,75,0.4);color:var(--yellow);">⚠ concurrent</span>`
-				}
-
-				stats7d := `<span style="color:var(--muted);">—</span>`
-				if row.Stats7d != nil && row.Stats7d.Total > 0 {
-					color := "var(--green)"
-					if row.Stats7d.Failed > 0 {
-						color = "var(--yellow)"
-					}
-					if row.Stats7d.Succeeded == 0 {
-						color = "var(--red)"
-					}
-					stats7d = fmt.Sprintf(`<span style="font-family:var(--font-mono);font-size:0.8rem;color:%s;">%d/%d</span>`,
-						color, row.Stats7d.Succeeded, row.Stats7d.Total)
-				}
-				stats7d += sparklineSVG(row.Durations)
-
-				resources := `<span style="color:var(--muted);">—</span>`
-				if row.CPURequest != nil || row.MemoryRequest != nil {
-					resources = ""
-					if row.CPURequest != nil {
-						resources += fmt.Sprintf(`<span class="badge" style="margin-right:3px;">cpu:%s</span>`, esc(*row.CPURequest))
-					}
-					if row.MemoryRequest != nil {
-						resources += fmt.Sprintf(`<span class="badge">mem:%s</span>`, esc(*row.MemoryRequest))
-					}
-				}
-
-				nameColor := "var(--accent)"
-				suspendedTag := ""
-				if row.Suspended {
-					nameColor = "var(--yellow)"
-					suspendedTag = ` <span class="badge badge-suspended">paused</span>`
-				}
-				if row.IsMissed {
-					suspendedTag += ` <span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);">missed</span>`
-				}
-
-				suspendBtn := fmt.Sprintf(
-					`<button class="btn ghost" style="font-size:0.75rem;"
-					  hx-post="/api/clusters/%s/cronjobs/%s/%s/suspend"
-					  hx-confirm="Suspend %s?"
-					  hx-swap="none"
-					  hx-on::after-request="if(event.detail.successful){showToast('Suspended',true);setTimeout(()=>location.reload(),800);}">⏸</button>`,
-					esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name))
-				if row.Suspended {
-					suspendBtn = fmt.Sprintf(
-						`<button class="btn" style="font-size:0.75rem;"
-						  hx-post="/api/clusters/%s/cronjobs/%s/%s/resume"
-						  hx-confirm="Resume %s?"
-						  hx-swap="none"
-						  hx-on::after-request="if(event.detail.successful){showToast('Resumed',true);setTimeout(()=>location.reload(),800);}">▶ Resume</button>`,
-						esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name))
-				}
-
-				triggerBtn := fmt.Sprintf(
-					`<button class="btn" style="font-size:0.75rem;margin-left:4px;"
-					  hx-post="/api/clusters/%s/cronjobs/%s/%s/trigger"
-					  hx-confirm="Trigger a manual run of %s?"
-					  hx-swap="none"
-					  hx-on::after-request="if(event.detail.successful){var d=JSON.parse(event.detail.xhr.responseText);window.location='/clusters/%s/cronjobs/%s/%s/runs/'+d.run_id;}else{showToast('Trigger failed',false);}">▶ Run</button>`,
-					esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name),
-					esc(clusterID), esc(row.Namespace), esc(row.Name))
-
-				fmt.Fprintf(w, `
-<tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs'">
-  <td><span style="font-family:var(--font-mono);color:%s;">%s</span>%s</td>
-  <td><code style="font-size:0.8rem;color:var(--muted);">%s</code></td>
-  <td>%s</td>
-  <td>%s</td>
-  <td>%s</td>
-  <td>%s</td>
-  <td style="white-space:nowrap;" onclick="event.stopPropagation()">%s%s</td>
-</tr>`,
-					esc(clusterID), esc(row.Namespace), esc(row.Name),
-					nameColor, esc(row.Name), suspendedTag,
-					esc(row.Schedule),
-					countdownSpan(row.NextRun),
-					lastStatus, stats7d, resources,
-					suspendBtn, triggerBtn,
-				)
+				fmt.Fprint(w, renderCronJobRow(row))
 			}
-
-			fmt.Fprint(w, `</tbody></table></div></div>`) // card + ns-section
+			fmt.Fprint(w, `</tbody></table></div></div>`)
 		}
 	}
 
-	fmt.Fprint(w, `</div>`) // page-content
+	fmt.Fprint(w, `</div>`)
 	fmt.Fprint(w, countdownJS)
 	fmt.Fprint(w, htmlFootSidebar)
 }
 
-// NamespaceDetail shows all CronJobs in a single namespace.
+// ── UI — Namespace detail ─────────────────────────────────────────────────────
+
 func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	clusterID := r.PathValue("clusterID")
 	ns := r.PathValue("ns")
@@ -321,17 +202,6 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type row struct {
-		storage.CronJob
-		NextRun      time.Time
-		LastRun      *storage.JobRun
-		Stats7d      *storage.RunStats
-		Durations    []int64
-		IsMissed     bool
-		IsConcurrent bool
-	}
-
-	// Precompute running counts.
 	runningRuns, _ := h.store.GetRunningRuns(ctx)
 	runningCount := make(map[string]int)
 	for _, rr := range runningRuns {
@@ -339,28 +209,12 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-
-	var rows []row
+	var rows []cronJobRowData
 	for _, cj := range allCronJobs {
 		if cj.Namespace != ns {
 			continue
 		}
-		r2 := row{CronJob: cj}
-		r2.NextRun, _ = schedule.NextRun(cj.Schedule, now)
-		r2.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
-		r2.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
-		r2.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
-		r2.IsConcurrent = runningCount[cj.ID] > 1
-		if !cj.Suspended {
-			if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
-				if now.Sub(prev) > 5*time.Minute {
-					if r2.LastRun == nil || (r2.LastRun.Status != "running" && r2.LastRun.StartedAt.Before(prev)) {
-						r2.IsMissed = true
-					}
-				}
-			}
-		}
-		rows = append(rows, r2)
+		rows = append(rows, h.buildCronJobRow(ctx, clusterID, cj, runningCount, now))
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -375,105 +229,19 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	if len(rows) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No CronJobs in this namespace.</div>`)
 	} else {
-		fmt.Fprint(w, `<div class="card" style="padding:0;overflow:hidden;"><table>
-<thead><tr>
-  <th>Name</th><th>Schedule</th><th>Next run</th>
-  <th>Last status</th><th>7d</th><th>Resources</th><th>Actions</th>
-</tr></thead><tbody>`)
-
+		fmt.Fprint(w, cronJobTableHeader)
 		for _, row := range rows {
-			lastStatus := `<span style="color:var(--muted);">—</span>`
-			if row.LastRun != nil {
-				lastStatus = statusBadge(row.LastRun.Status)
-			}
-			if row.IsConcurrent {
-				lastStatus += ` <span class="badge" style="border-color:rgba(236,201,75,0.4);color:var(--yellow);">⚠ concurrent</span>`
-			}
-			stats7d := `<span style="color:var(--muted);">—</span>`
-			if row.Stats7d != nil && row.Stats7d.Total > 0 {
-				color := "var(--green)"
-				if row.Stats7d.Failed > 0 {
-					color = "var(--yellow)"
-				}
-				if row.Stats7d.Succeeded == 0 {
-					color = "var(--red)"
-				}
-				stats7d = fmt.Sprintf(`<span style="font-family:var(--font-mono);font-size:0.8rem;color:%s;">%d/%d</span>`,
-					color, row.Stats7d.Succeeded, row.Stats7d.Total)
-			}
-			stats7d += sparklineSVG(row.Durations)
-			resources := `<span style="color:var(--muted);">—</span>`
-			if row.CPURequest != nil || row.MemoryRequest != nil {
-				resources = ""
-				if row.CPURequest != nil {
-					resources += fmt.Sprintf(`<span class="badge" style="margin-right:3px;">cpu:%s</span>`, esc(*row.CPURequest))
-				}
-				if row.MemoryRequest != nil {
-					resources += fmt.Sprintf(`<span class="badge">mem:%s</span>`, esc(*row.MemoryRequest))
-				}
-			}
-			nameColor := "var(--accent)"
-			suspendedTag := ""
-			if row.Suspended {
-				nameColor = "var(--yellow)"
-				suspendedTag = ` <span class="badge badge-suspended">paused</span>`
-			}
-			if row.IsMissed {
-				suspendedTag += ` <span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);">missed</span>`
-			}
-			suspendBtn := fmt.Sprintf(
-				`<button class="btn ghost" style="font-size:0.75rem;"
-				  hx-post="/api/clusters/%s/cronjobs/%s/%s/suspend"
-				  hx-confirm="Suspend %s?"
-				  hx-swap="none"
-				  hx-on::after-request="if(event.detail.successful){showToast('Suspended',true);setTimeout(()=>location.reload(),800);}">⏸</button>`,
-				esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name))
-			if row.Suspended {
-				suspendBtn = fmt.Sprintf(
-					`<button class="btn" style="font-size:0.75rem;"
-					  hx-post="/api/clusters/%s/cronjobs/%s/%s/resume"
-					  hx-confirm="Resume %s?"
-					  hx-swap="none"
-					  hx-on::after-request="if(event.detail.successful){showToast('Resumed',true);setTimeout(()=>location.reload(),800);}">▶ Resume</button>`,
-					esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name))
-			}
-			triggerBtn := fmt.Sprintf(
-				`<button class="btn" style="font-size:0.75rem;margin-left:4px;"
-				  hx-post="/api/clusters/%s/cronjobs/%s/%s/trigger"
-				  hx-confirm="Trigger a manual run of %s?"
-				  hx-swap="none"
-				  hx-on::after-request="if(event.detail.successful){var d=JSON.parse(event.detail.xhr.responseText);window.location='/clusters/%s/cronjobs/%s/%s/runs/'+d.run_id;}else{showToast('Trigger failed',false);}">▶ Run</button>`,
-				esc(clusterID), esc(row.Namespace), esc(row.Name), esc(row.Name),
-				esc(clusterID), esc(row.Namespace), esc(row.Name))
-
-			fmt.Fprintf(w, `
-<tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs'">
-  <td><span style="font-family:var(--font-mono);color:%s;">%s</span>%s</td>
-  <td><code style="font-size:0.8rem;color:var(--muted);">%s</code></td>
-  <td>%s</td>
-  <td>%s</td>
-  <td>%s</td>
-  <td>%s</td>
-  <td style="white-space:nowrap;" onclick="event.stopPropagation()">%s%s</td>
-</tr>`,
-				esc(clusterID), esc(row.Namespace), esc(row.Name),
-				nameColor, esc(row.Name), suspendedTag,
-				esc(row.Schedule),
-				countdownSpan(row.NextRun),
-				lastStatus, stats7d, resources,
-				suspendBtn, triggerBtn,
-			)
+			fmt.Fprint(w, renderCronJobRow(row))
 		}
 		fmt.Fprint(w, `</tbody></table></div>`)
 	}
 
-	fmt.Fprint(w, `</div>`) // page-content
+	fmt.Fprint(w, `</div>`)
 	fmt.Fprint(w, countdownJS)
 	fmt.Fprint(w, htmlFootSidebar)
 }
 
 // buildNsSidebar returns the sidebar HTML for namespace navigation.
-// activeNS is highlighted; pass "" for no active item (e.g. ClusterDetail).
 func buildNsSidebar(clusterID string, cronjobs []storage.CronJob, activeNS string) string {
 	type nsEntry struct {
 		Namespace string
@@ -511,4 +279,26 @@ func derefStr(s *string) string {
 		return "—"
 	}
 	return *s
+}
+
+// buildCronJobRow assembles the display data for one CronJob table row.
+// Called by both ClusterDetail and NamespaceDetail to avoid duplicating
+// the missed/concurrent detection logic.
+func (h *Handler) buildCronJobRow(ctx context.Context, clusterID string, cj storage.CronJob, runningCount map[string]int, now time.Time) cronJobRowData {
+	row := cronJobRowData{ClusterID: clusterID, CronJob: cj}
+	row.NextRun, _ = schedule.NextRun(cj.Schedule, now)
+	row.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
+	row.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
+	row.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
+	row.IsConcurrent = runningCount[cj.ID] > 1
+	if !cj.Suspended {
+		if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
+			if now.Sub(prev) > 5*time.Minute {
+				if row.LastRun == nil || (row.LastRun.Status != "running" && row.LastRun.StartedAt.Before(prev)) {
+					row.IsMissed = true
+				}
+			}
+		}
+	}
+	return row
 }
