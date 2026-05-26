@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/kubecron/kubecron/internal/storage"
@@ -130,12 +131,6 @@ func cronJobTableBodyPoll(url string) string {
 	return fmt.Sprintf(`<tbody hx-get="%s" hx-trigger="every 10s" hx-swap="innerHTML">`, esc(url))
 }
 
-const runTableHeader = `<div class="card" style="padding:0;overflow:hidden;"><table>
-<thead><tr>
-  <th>ID</th><th>Trigger</th><th>Status</th>
-  <th>Started</th><th>Duration</th><th>Exit code</th><th>Node</th>
-</tr></thead><tbody>`
-
 // renderRunRow returns the HTML <tr> for a single run in the run-list table.
 func renderRunRow(run storage.JobRun, clusterID, ns, name string) string {
 	shortID := run.ID
@@ -158,7 +153,7 @@ func renderRunRow(run storage.JobRun, clusterID, ns, name string) string {
 	if run.Trigger == "manual" {
 		trigger = `<span class="badge" style="border:1px solid var(--accent);color:var(--accent);">manual</span>`
 	}
-	return fmt.Sprintf(`<tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs/%s'">
+	return fmt.Sprintf(`<tr style="cursor:pointer;" data-day="%s" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs/%s'">
   <td><code style="color:var(--accent);">%s…</code></td>
   <td>%s</td>
   <td>%s</td>
@@ -167,6 +162,7 @@ func renderRunRow(run storage.JobRun, clusterID, ns, name string) string {
   <td>%s</td>
   <td style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">%s</td>
 </tr>`,
+		esc(run.StartedAt.Format("2006-01-02")),
 		esc(clusterID), esc(ns), esc(name), esc(run.ID), esc(shortID),
 		trigger,
 		statusBadge(run.Status),
@@ -174,4 +170,34 @@ func renderRunRow(run storage.JobRun, clusterID, ns, name string) string {
 		duration, exitCode,
 		esc(derefStr(run.NodeName)),
 	)
+}
+
+// runLoadMoreBtn returns the button markup for the load-more section.
+func runLoadMoreBtn(clusterID, ns, name, cursor, day string) string {
+	u := "/clusters/" + url.PathEscape(clusterID) +
+		"/cronjobs/" + url.PathEscape(ns) +
+		"/" + url.PathEscape(name) +
+		"/runs/more?before=" + url.QueryEscape(cursor)
+	if day != "" {
+		u += "&day=" + url.QueryEscape(day)
+	}
+	return fmt.Sprintf(
+		`<button class="btn" hx-get="%s" hx-target="#runs-tbody" hx-swap="beforeend">Load more</button>`,
+		esc(u))
+}
+
+// runLoadMoreWrap renders the "Load more" section below the runs table (initial render).
+func runLoadMoreWrap(clusterID, ns, name, cursor, day string) string {
+	return `<div id="load-more-wrap" style="text-align:center;padding:0.75rem 0;">` +
+		runLoadMoreBtn(clusterID, ns, name, cursor, day) + `</div>`
+}
+
+// runLoadMoreOOB returns an HTMX out-of-band innerHTML update for the load-more div.
+// Pass cursor="" to clear the button (last page reached).
+func runLoadMoreOOB(clusterID, ns, name, cursor, day string) string {
+	inner := ""
+	if cursor != "" {
+		inner = runLoadMoreBtn(clusterID, ns, name, cursor, day)
+	}
+	return `<div id="load-more-wrap" hx-swap-oob="innerHTML">` + inner + `</div>`
 }

@@ -4,9 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/kubecron/kubecron/internal/auth"
+	"github.com/kubecron/kubecron/internal/storage"
 )
+
+const runsPageSize = 50
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
 
@@ -67,6 +72,7 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
 	ctx := r.Context()
+	day := r.URL.Query().Get("day")
 
 	cj, err := h.store.GetCronJobByName(ctx, clusterID, ns, name)
 	if err != nil || cj == nil {
@@ -74,14 +80,18 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	runs, err := h.store.ListJobRuns(ctx, cj.ID)
+	var runs []storage.JobRun
+	if day != "" {
+		runs, err = h.store.ListJobRunsByDay(ctx, cj.ID, day)
+	} else {
+		runs, err = h.store.ListJobRunsPaged(ctx, cj.ID, "", runsPageSize)
+	}
 	if err != nil {
 		http.Error(w, "failed to load runs", http.StatusInternalServerError)
 		return
 	}
 
 	dailyStats, _ := h.store.GetDailyRunStats(ctx, cj.ID, 90)
-
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -111,17 +121,76 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, heatmapHTML(dailyStats, 90))
 	fmt.Fprint(w, `</div>`)
 
+	// Day filter chip.
+	if day != "" {
+		clearURL := "/clusters/" + url.PathEscape(clusterID) + "/cronjobs/" + url.PathEscape(ns) + "/" + url.PathEscape(name) + "/runs"
+		fmt.Fprintf(w, `<div style="margin-bottom:0.75rem;display:flex;align-items:center;gap:0.5rem;font-family:var(--font-mono);font-size:0.85rem;">
+  <span style="background:rgba(66,153,225,0.15);border:1px solid rgba(66,153,225,0.4);color:#4299e1;padding:2px 10px;border-radius:12px;">%s</span>
+  <a href="%s" style="color:var(--muted);text-decoration:none;" title="Clear filter">✕ clear</a>
+</div>`, esc(day), esc(clearURL))
+	}
+
 	if len(runs) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No runs yet.</div>`)
 	} else {
-		fmt.Fprint(w, runTableHeader)
+		fmt.Fprintf(w, `<div class="card" style="padding:0;overflow:hidden;"><table>
+<thead><tr>
+  <th>ID</th><th>Trigger</th><th>Status</th>
+  <th>Started</th><th>Duration</th><th>Exit code</th><th>Node</th>
+</tr></thead><tbody id="runs-tbody">`)
 		for _, run := range runs {
 			fmt.Fprint(w, renderRunRow(run, clusterID, ns, name))
 		}
 		fmt.Fprint(w, `</tbody></table></div>`)
+		if day == "" && len(runs) == runsPageSize {
+			cursor := runs[len(runs)-1].StartedAt.UTC().Format(time.RFC3339)
+			fmt.Fprint(w, runLoadMoreWrap(clusterID, ns, name, cursor, ""))
+		} else {
+			fmt.Fprint(w, `<div id="load-more-wrap"></div>`)
+		}
 	}
 	fmt.Fprint(w, `</div>`) // page-content
 	fmt.Fprint(w, htmlFootSidebar)
+}
+
+// RunsListMore handles HTMX "Load more" requests for the run list.
+// It returns only <tr> rows (appended to #runs-tbody) + OOB update for the load-more button.
+func (h *Handler) RunsListMore(w http.ResponseWriter, r *http.Request) {
+	clusterID := r.PathValue("clusterID")
+	ns := r.PathValue("ns")
+	name := r.PathValue("name")
+	ctx := r.Context()
+	before := r.URL.Query().Get("before")
+	day := r.URL.Query().Get("day")
+
+	cj, err := h.store.GetCronJobByName(ctx, clusterID, ns, name)
+	if err != nil || cj == nil {
+		http.Error(w, "cronjob not found", http.StatusNotFound)
+		return
+	}
+
+	var runs []storage.JobRun
+	if day != "" {
+		runs, err = h.store.ListJobRunsByDay(ctx, cj.ID, day)
+	} else {
+		runs, err = h.store.ListJobRunsPaged(ctx, cj.ID, before, runsPageSize)
+	}
+	if err != nil {
+		http.Error(w, "failed to load runs", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	for _, run := range runs {
+		fmt.Fprint(w, renderRunRow(run, clusterID, ns, name))
+	}
+	// OOB: update or clear the load-more button.
+	if day == "" && len(runs) == runsPageSize {
+		cursor := runs[len(runs)-1].StartedAt.UTC().Format(time.RFC3339)
+		fmt.Fprint(w, runLoadMoreOOB(clusterID, ns, name, cursor, ""))
+	} else {
+		fmt.Fprint(w, runLoadMoreOOB(clusterID, ns, name, "", ""))
+	}
 }
 
 // ── UI — Run detail ───────────────────────────────────────────────────────────

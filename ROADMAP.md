@@ -31,7 +31,7 @@ Items are not committed to any timeline — this is a solo side project.
 - [ ] **S3 log storage** — store log lines in S3/object storage instead of SQLite for unlimited retention
 - [ ] **Alerting** — webhook or email notification when a CronJob fails or is missing
 - [ ] **Grafana dashboard** — pre-built dashboard JSON for `kubecron_*` metrics
-- [ ] **Pagination** — cursor-based pagination for large run history lists
+- [x] **Pagination** — cursor-based "Load more" for run history; heatmap click-to-filter by day; blue "running" tile indicator _(unreleased)_
 - [ ] **CronJob annotations** — display description, owner, runbook link from K8s annotations
 - [ ] **Dark / light mode toggle**
 

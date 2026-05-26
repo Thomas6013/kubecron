@@ -35,7 +35,10 @@ All notable changes to KubeCron are documented here.
 - **SQLite performance** — `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-65536` (64 MB), log batch flush 200 ms / 200 lines
 
 ### Added
-- **Test coverage extended** — broadcaster pub/sub + concurrent stress test (`internal/streamer`); watcher `JobHandler` OnAdd/OnDelete tests with fake K8s client (`internal/watcher`); 5 suites total, `go test ./...` passes
+- **Cursor-based pagination on run history** — `RunsList` loads 50 runs per page; "Load more" button appends the next page via HTMX (`beforeend` on `#runs-tbody`) with OOB button update; `ListJobRunsPaged` / `ListJobRunsByDay` added to storage
+- **Heatmap "running" indicator** — days with at least one active run now show in blue (`#4299e1`) instead of red; tooltip shows running count; legend updated
+- **Heatmap click-to-filter** — clicking any heatmap tile navigates to `?day=YYYY-MM-DD`; a filter chip with a "✕ clear" link appears above the run table; `GET /clusters/.../runs/more` partial endpoint added for pagination
+- **Test coverage extended** — broadcaster pub/sub + concurrent stress test (`internal/streamer`); watcher `JobHandler` OnAdd/OnDelete tests with fake K8s client (`internal/watcher`); HTTP handler integration tests (`internal/api`); `go test ./...` passes
 
 ---
 

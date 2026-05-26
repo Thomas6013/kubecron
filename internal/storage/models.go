@@ -74,4 +74,5 @@ type DailyRunStat struct {
 	Day       string `json:"day"`
 	Total     int    `json:"total"`
 	Succeeded int    `json:"succeeded"`
+	Running   int    `json:"running"`
 }

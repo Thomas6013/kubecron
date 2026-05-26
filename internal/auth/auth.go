@@ -111,12 +111,12 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 		}
 		c, err := r.Cookie(sessionCookie)
 		if err != nil {
-			http.Redirect(w, r, "/auth/login?redirect="+r.URL.RequestURI(), http.StatusFound)
+			redirectToLogin(w, r)
 			return
 		}
 		sess, ok := a.parse(c.Value)
 		if !ok {
-			http.Redirect(w, r, "/auth/login?redirect="+r.URL.RequestURI(), http.StatusFound)
+			redirectToLogin(w, r)
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxKeyEmail, sess.Email)
@@ -273,6 +273,19 @@ func safeRedirect(raw, fallback string) string {
 		return raw
 	}
 	return fallback
+}
+
+// redirectToLogin sends the user to /auth/login.
+// For HTMX requests it uses HX-Redirect so the full page navigates instead of
+// injecting the login page into the current HTMX target element.
+func redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	target := "/auth/login?redirect=" + r.URL.RequestURI()
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", target)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 func randStr(n int) string {

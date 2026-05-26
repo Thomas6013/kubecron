@@ -11,7 +11,7 @@ import (
 type ClusterClient struct {
 	ID              string
 	RestConfig      *rest.Config
-	Clientset       *kubernetes.Clientset
+	Clientset       kubernetes.Interface
 	InformerFactory informers.SharedInformerFactory
 	MetricsClient   metricsv.Interface
 	MetricsEnabled  bool // set by probe

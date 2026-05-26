@@ -85,6 +85,7 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /readyz", h.Readyz)
 
 	// UI — HTML pages
+	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/{name}/runs/more", h.RunsListMore)
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/{name}/runs/{id}", h.RunDetail)
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/{name}/runs", h.RunsList)
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/rows", h.NamespaceRows)

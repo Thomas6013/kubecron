@@ -149,7 +149,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 ### Performance — Medium Priority
 
-- **No pagination on run history** — large run lists sent in one response. Fix: cursor-based pagination.
 - **Log lines stored in SQLite** — for high-volume CronJobs, the `log_lines` table can grow large before retention kicks in. Planned: S3 log storage backend.
 
 ### Testing — Medium Priority

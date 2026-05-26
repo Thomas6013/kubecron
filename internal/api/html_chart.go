@@ -114,27 +114,40 @@ func heatmapHTML(stats []storage.DailyRunStat, days int) string {
 		dayStr := day.Format("2006-01-02")
 
 		var color, tooltip string
+		var clickable bool
 		if day.Before(start) {
 			color = "#1a1d27"
 			tooltip = dayStr
 		} else if stat, ok := byDay[dayStr]; ok {
-			tooltip = fmt.Sprintf("%s: %d/%d ok", dayStr, stat.Succeeded, stat.Total)
-			switch {
-			case stat.Succeeded == stat.Total:
-				color = "var(--green)"
-			case stat.Succeeded == 0:
-				color = "var(--red)"
-			default:
-				color = "var(--yellow)"
+			clickable = true
+			if stat.Running > 0 {
+				color = "#4299e1"
+				tooltip = fmt.Sprintf("%s: %d running, %d/%d ok", dayStr, stat.Running, stat.Succeeded, stat.Total-stat.Running)
+			} else {
+				switch {
+				case stat.Succeeded == stat.Total:
+					color = "var(--green)"
+				case stat.Succeeded == 0:
+					color = "var(--red)"
+				default:
+					color = "var(--yellow)"
+				}
+				tooltip = fmt.Sprintf("%s: %d/%d ok", dayStr, stat.Succeeded, stat.Total)
 			}
 		} else {
 			color = "var(--border)"
 			tooltip = dayStr + ": no runs"
 		}
 
+		onclick := ""
+		cursor := ""
+		if clickable {
+			onclick = fmt.Sprintf(` onclick="location.href=location.pathname+'?day=%s'"`, dayStr)
+			cursor = ` style="cursor:pointer;"`
+		}
 		fmt.Fprintf(&sb,
-			`<rect x="%d" y="%d" width="%d" height="%d" rx="2" fill="%s" opacity="0.85"><title>%s</title></rect>`,
-			x, y, cellSize, cellSize, color, esc(tooltip))
+			`<rect x="%d" y="%d" width="%d" height="%d" rx="2" fill="%s" opacity="0.85"%s%s><title>%s</title></rect>`,
+			x, y, cellSize, cellSize, color, cursor, onclick, esc(tooltip))
 	}
 
 	sb.WriteString(`</svg>`)
@@ -143,6 +156,7 @@ func heatmapHTML(stats []storage.DailyRunStat, days int) string {
 		{"var(--green)", "all ok"},
 		{"var(--yellow)", "partial"},
 		{"var(--red)", "all failed"},
+		{"#4299e1", "running"},
 		{"var(--border)", "no runs"},
 	} {
 		fmt.Fprintf(&sb,

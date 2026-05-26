@@ -251,7 +251,9 @@ func (s *SQLiteStore) GetRecentDurations(ctx context.Context, cronjobID string, 
 
 func (s *SQLiteStore) GetDailyRunStats(ctx context.Context, cronjobID string, days int) ([]DailyRunStat, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT substr(started_at, 1, 10), COUNT(*), SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END)
+		SELECT substr(started_at, 1, 10), COUNT(*),
+		       SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN status='running'   THEN 1 ELSE 0 END)
 		FROM job_runs
 		WHERE cronjob_id = ? AND started_at > datetime('now', ?)
 		GROUP BY substr(started_at, 1, 10)
@@ -266,12 +268,63 @@ func (s *SQLiteStore) GetDailyRunStats(ctx context.Context, cronjobID string, da
 	var out []DailyRunStat
 	for rows.Next() {
 		var d DailyRunStat
-		if err := rows.Scan(&d.Day, &d.Total, &d.Succeeded); err != nil {
+		if err := rows.Scan(&d.Day, &d.Total, &d.Succeeded, &d.Running); err != nil {
 			return nil, wrapErr("GetDailyRunStats scan", err)
 		}
 		out = append(out, d)
 	}
 	return out, wrapErr("GetDailyRunStats rows", rows.Err())
+}
+
+func (s *SQLiteStore) ListJobRunsPaged(ctx context.Context, cronjobID, beforeCursor string, limit int) ([]JobRun, error) {
+	var (
+		r   *sql.Rows
+		err error
+	)
+	if beforeCursor == "" {
+		r, err = s.db.QueryContext(ctx,
+			`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? ORDER BY started_at DESC LIMIT ?`,
+			cronjobID, limit,
+		)
+	} else {
+		r, err = s.db.QueryContext(ctx,
+			`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? AND datetime(started_at) < datetime(?) ORDER BY started_at DESC LIMIT ?`,
+			cronjobID, beforeCursor, limit,
+		)
+	}
+	if err != nil {
+		return nil, wrapErr("ListJobRunsPaged", err)
+	}
+	defer r.Close()
+	var out []JobRun
+	for r.Next() {
+		run, err := scanJobRun(r)
+		if err != nil {
+			return nil, wrapErr("ListJobRunsPaged scan", err)
+		}
+		out = append(out, *run)
+	}
+	return out, wrapErr("ListJobRunsPaged rows", r.Err())
+}
+
+func (s *SQLiteStore) ListJobRunsByDay(ctx context.Context, cronjobID, day string) ([]JobRun, error) {
+	r, err := s.db.QueryContext(ctx,
+		`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? AND substr(started_at, 1, 10) = ? ORDER BY started_at DESC`,
+		cronjobID, day,
+	)
+	if err != nil {
+		return nil, wrapErr("ListJobRunsByDay", err)
+	}
+	defer r.Close()
+	var out []JobRun
+	for r.Next() {
+		run, err := scanJobRun(r)
+		if err != nil {
+			return nil, wrapErr("ListJobRunsByDay scan", err)
+		}
+		out = append(out, *run)
+	}
+	return out, wrapErr("ListJobRunsByDay rows", r.Err())
 }
 
 func (s *SQLiteStore) UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error {

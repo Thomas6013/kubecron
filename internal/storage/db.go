@@ -29,6 +29,8 @@ type Store interface {
 	UpsertJobRun(ctx context.Context, r JobRun) error
 	GetJobRun(ctx context.Context, id string) (*JobRun, error)
 	ListJobRuns(ctx context.Context, cronjobID string) ([]JobRun, error)
+	ListJobRunsPaged(ctx context.Context, cronjobID, beforeCursor string, limit int) ([]JobRun, error)
+	ListJobRunsByDay(ctx context.Context, cronjobID, day string) ([]JobRun, error)
 	GetLastJobRun(ctx context.Context, cronjobID string) (*JobRun, error)
 	GetRunStats7d(ctx context.Context, cronjobID string) (*RunStats, error)
 	GetRecentDurations(ctx context.Context, cronjobID string, limit int) ([]int64, error)
