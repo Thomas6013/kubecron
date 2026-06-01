@@ -21,7 +21,7 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 - **Live log streaming** — watch CronJob pod logs in real time as they execute, via SSE
 - **Run history** — every execution recorded with status, duration, exit code, and retry count
 - **Resource usage** — CPU and memory sampled every 15 s when metrics-server is available; avg/max computed per run
-- **7-day statistics** — success rate, average duration, p95 duration per CronJob
+- **7-day statistics** — success rate, average and max duration per CronJob
 - **Next-run countdown** — computed from the cron expression, updated live in the browser
 - **Suspend / Resume / Trigger** — control CronJobs directly from the UI without touching kubectl
 - **Multi-cluster** — one kubeconfig file per cluster in a directory; all clusters shown in a unified dashboard
@@ -71,7 +71,8 @@ Key Helm values:
 
 | Value | Default | Description |
 |---|---|---|
-| `config.retentionDays` | `7` | Days of run history (logs + metrics) to keep |
+| `config.retentionDays` | `90` | Days of run history (metadata) to keep |
+| `config.logRetentionDays` | `14` | Days of raw log lines to keep (≤ `retentionDays`) |
 | `config.metricsSampleInterval` | `15` | Resource sampling interval (seconds) |
 | `persistence.size` | `500Mi` | PVC size for SQLite data |
 | `ingress.enabled` | `false` | Expose via Ingress |
@@ -95,11 +96,9 @@ Open http://localhost:8080.
 ### Local dev
 
 ```bash
-# Requires: Go 1.26+, templ CLI
-go install github.com/a-h/templ/cmd/templ@latest
-
-# Generate templ files then run
-templ generate && go run ./cmd/kubecron
+# Requires: Go 1.26+ only — no codegen, no Node.js build step.
+# Place kubeconfig files in dev/kubeconfigs/, then:
+go run ./cmd/kubecron
 ```
 
 ---
@@ -113,7 +112,8 @@ All configuration is via environment variables.
 | `KUBECONFIG_DIR` | `/etc/kubecron/kubeconfigs` | Directory with one kubeconfig file per cluster |
 | `DB_PATH` | `/data/kubecron.db` | SQLite database file path |
 | `PORT` | `8080` | HTTP listen port |
-| `RETENTION_DAYS` | `7` | How many days of run history to keep |
+| `RETENTION_DAYS` | `90` | How many days of run history (metadata) to keep |
+| `LOG_RETENTION_DAYS` | `14` | How many days of raw log lines to keep (≤ `RETENTION_DAYS`) |
 | `METRICS_SAMPLE_INTERVAL` | `15` | Resource sampling interval in seconds (requires metrics-server) |
 | `OIDC_ENABLED` | `false` | Enable OIDC/SSO authentication |
 | `OIDC_ISSUER_URL` | _(empty)_ | OIDC provider issuer URL |
@@ -121,6 +121,8 @@ All configuration is via environment variables.
 | `OIDC_CLIENT_SECRET` | _(empty)_ | OIDC client secret (store in a K8s Secret) |
 | `OIDC_REDIRECT_URL` | _(empty)_ | `https://<host>/auth/callback` — must be HTTPS in production |
 | `OIDC_SESSION_KEY` | _(empty)_ | ≥32-char random string for session signing (store in a K8s Secret) |
+| `OIDC_ALLOWED_EMAILS` | _(empty)_ | Comma-separated allow-list of emails permitted to log in (empty = any account) |
+| `OIDC_OPERATOR_EMAILS` | _(empty)_ | Comma-separated emails allowed to suspend/resume/trigger; others are read-only (empty = all operators) |
 
 See `.env.example` for a commented template.
 
@@ -140,8 +142,8 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 
 - **Informers** watch CronJob, Job, and Pod events and update the SQLite database in real time.
 - **Log streaming** uses `client-go` `GetLogs(Follow=true)` and broadcasts lines via an in-memory pub/sub to SSE subscribers.
-- **Resource sampling** polls the Metrics API every `METRICS_SAMPLE_INTERVAL` seconds per running pod.
-- **HTML templates** are compiled from `.templ` files at build time — no runtime template parsing.
+- **Resource sampling** polls the Metrics API every `METRICS_SAMPLE_INTERVAL` seconds per running pod (only on clusters where metrics-server is reachable).
+- **HTML** is server-rendered directly in Go (`internal/api/*.go`) — no template engine, no codegen, no runtime template parsing.
 
 ---
 
@@ -150,6 +152,7 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 - **Minimal RBAC** — the ClusterRole grants only `get`/`list`/`watch` on CronJobs, Jobs, and Pods, plus `patch` on CronJobs and `create` on Jobs (for suspend/resume/trigger). No access to Secrets.
 - **Distroless runtime image** — `gcr.io/distroless/static:nonroot`, no shell, no package manager.
 - **OIDC authentication** — when enabled, all routes require a valid session. The session key is never logged.
+- **Authorization** — optionally restrict login to an email allow-list (`OIDC_ALLOWED_EMAILS`) and limit mutating actions (suspend/resume/trigger) to operators (`OIDC_OPERATOR_EMAILS`); everyone else is read-only.
 - **No token forwarding** — KubeCron uses its own Service Account, not user tokens. RBAC is enforced at the cluster level.
 - **Structured logging** — `log/slog` JSON output, no sensitive data ever logged.
 

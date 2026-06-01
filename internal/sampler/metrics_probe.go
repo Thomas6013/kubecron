@@ -14,8 +14,10 @@ import (
 const probeInterval = 5 * time.Minute
 
 // probe checks whether the Metrics API is reachable on the given cluster.
-// On success it marks the cluster as metrics-enabled in the store.
-func probe(ctx context.Context, clusterID string, metricsClient metricsv.Interface, store storage.Store) {
+// On success it marks the cluster as metrics-enabled in the store and invokes
+// onSuccess (used to flip the in-memory ClusterClient flag read by the pod
+// watcher). On failure the cluster is left as-is.
+func probe(ctx context.Context, clusterID string, metricsClient metricsv.Interface, store storage.Store, onSuccess func()) {
 	_, err := metricsClient.MetricsV1beta1().PodMetricses("default").List(ctx, metav1.ListOptions{Limit: 1})
 	if err != nil {
 		slog.Info("metrics API not available", "cluster", clusterID, "err", err)
@@ -24,18 +26,22 @@ func probe(ctx context.Context, clusterID string, metricsClient metricsv.Interfa
 	if err := store.SetClusterMetricsEnabled(ctx, clusterID, true); err != nil {
 		slog.Warn("failed to mark cluster metrics enabled", "cluster", clusterID, "err", err)
 	}
+	if onSuccess != nil {
+		onSuccess()
+	}
 }
 
 // StartProbe runs an initial probe immediately and then re-probes every 5 minutes
-// in the background until ctx is cancelled.
-func StartProbe(ctx context.Context, clusterID string, metricsClient metricsv.Interface, store storage.Store) {
+// in the background until ctx is cancelled. onSuccess is called each time the
+// Metrics API is found reachable; callers use it to enable resource sampling.
+func StartProbe(ctx context.Context, clusterID string, metricsClient metricsv.Interface, store storage.Store, onSuccess func()) {
 	if metricsClient == nil {
 		slog.Info("metrics client unavailable, skipping probe", "cluster", clusterID)
 		return
 	}
 
 	// Run an immediate probe.
-	probe(ctx, clusterID, metricsClient, store)
+	probe(ctx, clusterID, metricsClient, store, onSuccess)
 
 	go func() {
 		ticker := time.NewTicker(probeInterval)
@@ -44,7 +50,7 @@ func StartProbe(ctx context.Context, clusterID string, metricsClient metricsv.In
 		for {
 			select {
 			case <-ticker.C:
-				probe(ctx, clusterID, metricsClient, store)
+				probe(ctx, clusterID, metricsClient, store, onSuccess)
 			case <-ctx.Done():
 				return
 			}

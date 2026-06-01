@@ -22,7 +22,7 @@ type PodHandler struct {
 	streamer       *streamer.Streamer
 	sampler        *sampler.Sampler
 	clientset      kubernetes.Interface
-	metricsEnabled bool
+	metricsEnabled func() bool // read live so the 5-min probe re-enable takes effect
 	runIndex       *RunIndex
 }
 
@@ -33,7 +33,7 @@ func NewPodHandler(
 	str *streamer.Streamer,
 	smp *sampler.Sampler,
 	clientset kubernetes.Interface,
-	metricsEnabled bool,
+	metricsEnabled func() bool,
 	idx *RunIndex,
 ) *PodHandler {
 	return &PodHandler{
@@ -135,7 +135,7 @@ func (h *PodHandler) OnUpdate(oldObj, newObj interface{}) {
 		}
 
 		// Start resource sampling if metrics are enabled for this cluster.
-		if h.metricsEnabled && h.sampler != nil {
+		if h.sampler != nil && h.metricsEnabled() {
 			h.sampler.Start(ctx, h.clusterID, namespace, podName, runID)
 		}
 

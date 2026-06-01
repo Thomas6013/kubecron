@@ -121,7 +121,6 @@ func (m *Manager) registerCluster(ctx context.Context, clusterID string, cfg *re
 		Clientset:       clientset,
 		InformerFactory: factory,
 		MetricsClient:   metricsClient,
-		MetricsEnabled:  false,
 	}
 
 	m.registry.Register(client)

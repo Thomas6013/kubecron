@@ -86,7 +86,9 @@ func main() {
 
 	for _, cc := range mgr.Registry().All() {
 		// Probe the Metrics API availability (background re-probe every 5 min).
-		sampler.StartProbe(ctx, cc.ID, cc.MetricsClient, store)
+		// On success, flip the in-memory flag the pod watcher reads to gate
+		// resource sampling.
+		sampler.StartProbe(ctx, cc.ID, cc.MetricsClient, store, func() { cc.SetMetricsEnabled(true) })
 
 		s := sampler.NewSampler(store, cc.MetricsClient, sampleInterval)
 

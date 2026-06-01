@@ -75,9 +75,15 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /api/runs/{id}/stream", h.StreamLogs)
 	mux.HandleFunc("GET /api/runs/{id}/resources", h.GetResourceSamples)
 	mux.HandleFunc("GET /api/runs/{id}/logs.txt", h.DownloadLogs)
-	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/suspend", h.Suspend)
-	mux.HandleFunc("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume", h.Resume)
-	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", triggerLimiter(http.HandlerFunc(h.Trigger)))
+	// operator wraps a mutating handler with the operator-authorization check
+	// when OIDC is enabled; otherwise it is a pass-through (open access).
+	operator := func(next http.Handler) http.Handler { return next }
+	if s.authenticator != nil {
+		operator = s.authenticator.RequireOperator
+	}
+	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/suspend", operator(http.HandlerFunc(h.Suspend)))
+	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume", operator(http.HandlerFunc(h.Resume)))
+	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", operator(triggerLimiter(http.HandlerFunc(h.Trigger))))
 
 	// Observability
 	mux.Handle("GET /metrics", promhttp.Handler())

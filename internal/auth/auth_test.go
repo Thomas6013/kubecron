@@ -90,3 +90,32 @@ func TestSafeRedirect(t *testing.T) {
 		}
 	}
 }
+
+func TestIsAllowedAndCanOperate(t *testing.T) {
+	// No lists configured → everything permitted (backwards-compatible).
+	open := &Authenticator{}
+	if !open.IsAllowed("anyone@x.com") || !open.CanOperate("anyone@x.com") {
+		t.Error("empty config should allow all")
+	}
+
+	a := &Authenticator{
+		allowedEmails:  emailSet([]string{"Alice@X.com", "bob@x.com"}),
+		operatorEmails: emailSet([]string{"alice@x.com"}),
+	}
+	cases := []struct {
+		email             string
+		allowed, operator bool
+	}{
+		{"alice@x.com", true, true},   // operator (case-insensitive on config)
+		{"BOB@x.com", true, false},    // allowed but read-only (case-insensitive input)
+		{"eve@evil.com", false, false}, // not allowed at all
+	}
+	for _, c := range cases {
+		if got := a.IsAllowed(c.email); got != c.allowed {
+			t.Errorf("IsAllowed(%q) = %v, want %v", c.email, got, c.allowed)
+		}
+		if got := a.CanOperate(c.email); got != c.operator {
+			t.Errorf("CanOperate(%q) = %v, want %v", c.email, got, c.operator)
+		}
+	}
+}

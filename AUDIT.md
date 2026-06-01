@@ -418,4 +418,87 @@ The product delivers the essentials: multi-cluster monitoring, run history, live
 **Session 1 (2026-05-21):** SEC-1, SEC-3, BUG-1, DEAD-2 removed, DEAD-1 wired with 6 real metrics.
 **Session 2 (2026-05-21):** SEC-2, SEC-4 (+SEC-12 warn), BUG-2, BUG-3, MAINT-2 partial, COV-1 baseline (3 test suites, 16 test cases).
 **Session 3 (2026-05-21):** SEC-5 (removed CORS), SEC-6 (CSRF double-submit cookie), SEC-11 (rate limit login+trigger), BUG-4 (RunIndex O(1)), BUG-5 (Manager.Load filter), BUG-6 (resolved by SEC-3), DEAD-5 (trivial wrappers removed), MAINT-2 (renderRunRow + runTableHeader), MAINT-4 (html.go split), MAINT-5 (buildCronJobRow extracted), MAINT-6 (jobRunCols const), COV-1 (broadcaster + watcher tests).
-Remaining open: BUG-7, BUG-8, BUG-9, BUG-10 (minor bugs), SEC-7 (Dockerfile digest pins), SEC-8 (GHA SHA pins), SEC-9 (CI tool version pin), SEC-10 (seccompProfile), MAINT-7, internal/api HTTP handler tests.
+Remaining open after S3: BUG-7, BUG-8, BUG-9, BUG-10 (minor bugs), SEC-7 (Dockerfile digest pins), SEC-8 (GHA SHA pins), SEC-9 (CI tool version pin), SEC-10 (seccompProfile), MAINT-7, internal/api HTTP handler tests.
+
+---
+
+# Session 4 — 2026-06-01 (fresh full re-audit)
+
+Re-reviewed the whole tree against the Session 1–3 fixes (all still in place; `internal/api` handler integration tests now exist — COV improved). Two **new, empirically-confirmed runtime bugs** were found that silently disabled advertised features, plus an authorization gap. The agreed "top 5" actions were implemented this session. Build, `go vet`, `go test ./...`, and `helm lint` all pass.
+
+## 🔴 New confirmed bugs
+
+### ✅ BUG-11 — Resource sampling never ran (CPU/RAM feature dead) *(fixed 2026-06-01)*
+**Files:** `cluster/manager.go`, `cluster/client.go`, `cluster/registry.go`, `sampler/metrics_probe.go`, `watcher/controller.go`, `watcher/pod.go`, `cmd/kubecron/main.go`
+
+`registerCluster` hardcoded `MetricsEnabled: false` on every `ClusterClient`. The metrics probe only wrote the flag to the **DB** (`store.SetClusterMetricsEnabled`); `Registry.SetMetricsEnabled` existed but was **never called** (dead code). `PodHandler` captured the static `false` at startup, so `if h.metricsEnabled && …` (`pod.go`) was always false → `resource_samples` was never populated → `FinalizeResourceUsage` averaged an empty table → `avg/max_*` stayed NULL → the run-detail resource charts never rendered. The entire "resource tracking" pillar produced nothing.
+
+**Fix applied:**
+- `ClusterClient.metricsEnabled` is now an `atomic.Bool` with `MetricsEnabled()`/`SetMetricsEnabled()` accessors (race-free: probe goroutine writes, informer handlers read).
+- `PodHandler.metricsEnabled` is now a `func() bool` read **live** on each pod event, so the 5-minute re-probe takes effect.
+- `StartProbe` takes an `onSuccess` callback; `main.go` passes `func(){ cc.SetMetricsEnabled(true) }`.
+- Removed dead `Registry.SetMetricsEnabled`.
+
+### ✅ BUG-12 — `duration_ms` generated column always NULL *(fixed 2026-06-01)*
+**Files:** `migrations/000003_duration_ms.{up,down}.sql`, `storage/queries.go`, `storage/queries_test.go`
+
+`duration_ms` was a `STORED GENERATED` column computed with `julianday()`, but the SQLite driver's timestamp text format is not parseable by `julianday()`, so the column was **always NULL** (verified empirically). `scanJobRun` has a Go-side fallback so single-run *display* was correct — but SQL aggregates over the column were not:
+- `GetRecentDurations` filters `WHERE duration_ms IS NOT NULL` → returned 0 rows → **duration sparklines never rendered**.
+- `GetRunStats7d` `AVG/MAX(duration_ms)` → always NULL → **7-day avg/max duration always blank**.
+
+**Fix applied:** migration `000003` drops the generated column and replaces it with a plain `INTEGER` column. `UpdateJobRunStatus` and `MarkRunFailed` now compute the duration in Go (`durationFromStart`, format-independent) and persist it via `COALESCE(?, duration_ms)`. Regression test `TestUpdateJobRunStatus_PopulatesDuration` asserts `GetRecentDurations` and `GetRunStats7d` return data.
+
+## 🔒 Security
+
+### ✅ SEC-13 — No in-app authorization *(implemented 2026-06-01)*
+OIDC only authenticated — **any** logged-in user could suspend/trigger CronJobs on **all** clusters.
+
+**Fix applied:** two optional env vars (empty = backwards-compatible open access):
+- `OIDC_ALLOWED_EMAILS` — login allow-list, enforced in `HandleCallback` (rejected accounts get 403, no session).
+- `OIDC_OPERATOR_EMAILS` — only these may suspend/resume/trigger; everyone else is read-only. Enforced by `Authenticator.RequireOperator` middleware wrapping the three mutating POST routes in `server.go`.
+
+Added `Authenticator.IsAllowed`/`CanOperate` + unit test `TestIsAllowedAndCanOperate`. Exposed in Helm (`oidc.allowedEmails`, `oidc.operatorEmails`) and `.env.example`.
+**Follow-up (open):** the UI still renders action buttons for read-only users (they get a 403 toast on click). Hide the buttons when the session lacks operator rights.
+
+### 🟠 SEC-14 — CSRF cookie missing `Secure` flag
+**File:** `internal/api/csrf.go` — the session cookie got `Secure` (SEC-4) but the CSRF cookie did not. Add the same https-derived `Secure` flag.
+
+### 🟡 SEC-15 — CDN scripts lack SRI
+htmx (unpkg), Google Fonts, Chart.js (jsdelivr) are loaded without `integrity`/`crossorigin`. Add SRI hashes or vendor them into `/static` (CSS is already embedded).
+
+## ⚡ Performance
+
+### ✅ PERF-1 — Dashboard / ListClusters N+1 query storm *(fixed 2026-06-01)*
+**File:** `internal/api/handlers_cluster.go` — both handlers looped every cluster → every cronjob → `ListJobRuns` (loading **all** run rows) just to count running runs. Replaced with a single `GetRunningRuns` grouped by cluster (`runningCountByCluster` helper, keyed on the `clusterID/…` prefix of `cronjob_id`).
+
+### 🟡 PERF-2 — HTMX 10 s polling re-computes per cronjob (open)
+`cronJobTableBodyPoll` triggers `buildCronJobRow` (4 store calls per cronjob) every 10 s per viewer. Fine for small installs; a per-cluster snapshot cache refreshed on informer events would scale better.
+
+## 📚 Documentation
+
+### ✅ DOC-1 — Stale README *(fixed 2026-06-01)*
+README still told contributors to install `templ` and run `templ generate` (templ was removed in S1), claimed `.templ` compiled templates, and advertised non-existent "p95 duration". Corrected the Local-dev steps, Architecture note, and stats wording.
+
+### ✅ DOC-2 — `LOG_RETENTION_DAYS` undocumented / not in chart *(fixed 2026-06-01)*
+The var existed in code but was absent from `values.yaml`/`deployment.yaml` and the README table; `RETENTION_DAYS` default also disagreed across docs (90 in code, 7 in Helm/README). Reconciled to the code defaults (90 / 14), exposed `config.logRetentionDays` in the chart, and documented both. *(Note: Helm previously defaulted retention to 7 days; the chart now matches the code default of 90 — set `config.retentionDays` explicitly if a shorter window is desired.)*
+
+## 🎬 Top 5 actions — Session 4 status
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Fix resource sampling never running (BUG-11) | ✅ Fixed 2026-06-01 |
+| 2 | Fix `duration_ms` always NULL + regression test (BUG-12) | ✅ Fixed 2026-06-01 |
+| 3 | Add authorization: login allow-list + operator/read-only (SEC-13) | ✅ Implemented 2026-06-01 |
+| 4 | Fix stale README + expose `LOG_RETENTION_DAYS` (DOC-1/DOC-2) | ✅ Fixed 2026-06-01 |
+| 5 | Collapse Dashboard/ListClusters N+1 into one query (PERF-1) | ✅ Fixed 2026-06-01 |
+
+## Remaining open after Session 4
+- SEC-7 (Dockerfile digest pins), SEC-8 (GHA SHA pins), SEC-9 (CI tool version pin), SEC-10 (seccompProfile), SEC-14 (CSRF `Secure`), SEC-15 (CDN SRI).
+- SEC-13 UI follow-up (hide action buttons for read-only users).
+- BUG-7, BUG-8, BUG-9 (heatmap UTC), BUG-10 (log retry for empty `succeeded` runs).
+- PERF-2 (polling snapshot cache).
+- MAINT-7 (dedupe trigger button), `htmlHead` unused `title` param, log-line HTML/`data-raw` wrapper helper, repeated date-format constant.
+- Tests: `go test -race` in Linux CI; sampler metrics-enable wiring test.
+
+## 🎯 Product / MVP note
+The idea is strong and well-differentiated (historical, cross-cluster CronJob visibility — a real gap `kubectl`/k9s/Lens don't fill), and the execution (informers → SQLite → SSE → server-rendered HTML, single binary) is appropriately scoped. With BUG-11/BUG-12 fixed, the two headline features (resource tracking, duration trends) actually work now. The remaining highest-value gap for "usable by a team" is **failure alerting / webhooks** — monitoring without notification still requires someone watching the screen. Recommend that next, ahead of more UI.

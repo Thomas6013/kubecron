@@ -79,7 +79,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		c.client.Clientset,
 		c.client.MetricsEnabled,
 		runIndex,
-	)
+	) // c.client.MetricsEnabled is a func() bool, read live by the handler
 	if _, err := podInformer.AddEventHandler(cache.ResourceEventHandlerDetailedFuncs{
 		AddFunc:    podHandler.OnAdd,
 		UpdateFunc: podHandler.OnUpdate,

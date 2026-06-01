@@ -54,6 +54,8 @@ spec:
           value: /etc/kubecron/kubeconfigs
         - name: RETENTION_DAYS
           value: {{ .Values.config.retentionDays | quote }}
+        - name: LOG_RETENTION_DAYS
+          value: {{ .Values.config.logRetentionDays | quote }}
         - name: METRICS_SAMPLE_INTERVAL
           value: {{ .Values.config.metricsSampleInterval | quote }}
         {{- if .Values.oidc.enabled }}
@@ -75,6 +77,14 @@ spec:
             secretKeyRef:
               name: {{ include "kubecron.oidcSecretName" . }}
               key: session-key
+        {{- with .Values.oidc.allowedEmails }}
+        - name: OIDC_ALLOWED_EMAILS
+          value: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.oidc.operatorEmails }}
+        - name: OIDC_OPERATOR_EMAILS
+          value: {{ . | quote }}
+        {{- end }}
         {{- end }}
         volumeMounts:
         - name: data

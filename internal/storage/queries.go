@@ -328,13 +328,36 @@ func (s *SQLiteStore) ListJobRunsByDay(ctx context.Context, cronjobID, day strin
 }
 
 func (s *SQLiteStore) UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error {
+	// Compute duration in Go: the driver's timestamp format is not parseable by
+	// SQLite's julianday()/strftime(), so the arithmetic cannot be done in SQL.
+	// COALESCE keeps any existing value when finishedAt is nil.
+	durationMs := durationFromStart(ctx, s, id, finishedAt)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE job_runs
-		SET status = ?, finished_at = ?, exit_code = ?, retry_count = ?
+		SET status = ?, finished_at = ?, exit_code = ?, retry_count = ?,
+		    duration_ms = COALESCE(?, duration_ms)
 		WHERE id = ?`,
-		status, finishedAt, exitCode, retryCount, id,
+		status, finishedAt, exitCode, retryCount, durationMs, id,
 	)
 	return wrapErr("UpdateJobRunStatus", err)
+}
+
+// durationFromStart returns the elapsed milliseconds between the run's stored
+// started_at and finishedAt, or nil when finishedAt is nil or started_at can't
+// be read. Never negative.
+func durationFromStart(ctx context.Context, s *SQLiteStore, id string, finishedAt *time.Time) *int64 {
+	if finishedAt == nil {
+		return nil
+	}
+	var startedAt time.Time
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at FROM job_runs WHERE id = ?`, id).Scan(&startedAt); err != nil {
+		return nil
+	}
+	ms := finishedAt.Sub(startedAt).Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	return &ms
 }
 
 func (s *SQLiteStore) UpdateJobRunNode(ctx context.Context, id, nodeName, containerImage string) error {
@@ -366,10 +389,13 @@ func (s *SQLiteStore) GetRunningRuns(ctx context.Context) ([]JobRun, error) {
 }
 
 func (s *SQLiteStore) MarkRunFailed(ctx context.Context, id string) error {
+	now := time.Now()
+	durationMs := durationFromStart(ctx, s, id, &now)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE job_runs
-		SET status = 'failed', exit_code = -1, finished_at = datetime('now')
-		WHERE id = ?`, id,
+		SET status = 'failed', exit_code = -1, finished_at = ?,
+		    duration_ms = COALESCE(?, duration_ms)
+		WHERE id = ?`, now, durationMs, id,
 	)
 	return wrapErr("MarkRunFailed", err)
 }

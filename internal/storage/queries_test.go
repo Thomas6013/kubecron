@@ -169,3 +169,47 @@ func TestGetLogLinesTail_LimitGreaterThanTotal(t *testing.T) {
 		t.Errorf("expected 1 line, got %d", len(got))
 	}
 }
+
+// TestUpdateJobRunStatus_PopulatesDuration is the regression test for BUG-B:
+// duration_ms must be persisted (not NULL) so the SQL aggregates that power the
+// duration sparkline (GetRecentDurations) and the 7-day stats (GetRunStats7d)
+// return data. Before the fix the generated column was always NULL.
+func TestUpdateJobRunStatus_PopulatesDuration(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seed(t, store, "c1", "c1/default/test-cron")
+
+	started := time.Now().Add(-90 * time.Second)
+	if err := store.UpsertJobRun(ctx, storage.JobRun{
+		ID: "run-d", CronJobID: "c1/default/test-cron",
+		PodName: "j", Trigger: "scheduled", Status: "running", StartedAt: started,
+	}); err != nil {
+		t.Fatalf("UpsertJobRun: %v", err)
+	}
+
+	finished := started.Add(90 * time.Second)
+	if err := store.UpdateJobRunStatus(ctx, "run-d", "succeeded", &finished, 0, 0); err != nil {
+		t.Fatalf("UpdateJobRunStatus: %v", err)
+	}
+
+	// GetRecentDurations filters on `duration_ms IS NOT NULL` — must return our run.
+	durs, err := store.GetRecentDurations(ctx, "c1/default/test-cron", 10)
+	if err != nil {
+		t.Fatalf("GetRecentDurations: %v", err)
+	}
+	if len(durs) != 1 {
+		t.Fatalf("GetRecentDurations: expected 1 duration, got %d (%v)", len(durs), durs)
+	}
+	if durs[0] < 89_000 || durs[0] > 91_000 {
+		t.Errorf("GetRecentDurations: expected ~90000ms, got %d", durs[0])
+	}
+
+	// GetRunStats7d aggregates AVG/MAX(duration_ms) — must be non-nil.
+	stats, err := store.GetRunStats7d(ctx, "c1/default/test-cron")
+	if err != nil {
+		t.Fatalf("GetRunStats7d: %v", err)
+	}
+	if stats.AvgDurationMs == nil || stats.MaxDurationMs == nil {
+		t.Fatalf("GetRunStats7d: avg/max duration nil — duration_ms not persisted")
+	}
+}

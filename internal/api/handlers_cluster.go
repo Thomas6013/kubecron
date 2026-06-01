@@ -29,21 +29,14 @@ func (h *Handler) ListClusters(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list clusters")
 		return
 	}
+	runningByCluster := h.runningCountByCluster(ctx)
+
 	resp := make([]clusterResponse, 0, len(clusters))
 	for _, c := range clusters {
 		cronjobs, _ := h.store.ListCronJobs(ctx, c.ID)
-		running := 0
-		for _, cj := range cronjobs {
-			runs, _ := h.store.ListJobRuns(ctx, cj.ID)
-			for _, run := range runs {
-				if run.Status == "running" {
-					running++
-				}
-			}
-		}
 		resp = append(resp, clusterResponse{
 			ID: c.ID, Name: c.Name,
-			CronJobCount: len(cronjobs), RunningCount: running,
+			CronJobCount: len(cronjobs), RunningCount: runningByCluster[c.ID],
 			MetricsEnabled: c.MetricsEnabled,
 		})
 	}
@@ -67,19 +60,12 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	runningByCluster := h.runningCountByCluster(ctx)
+
 	cards := make([]card, 0, len(clusters))
 	for _, c := range clusters {
 		cjs, _ := h.store.ListCronJobs(ctx, c.ID)
-		running := 0
-		for _, cj := range cjs {
-			runs, _ := h.store.ListJobRuns(ctx, cj.ID)
-			for _, run := range runs {
-				if run.Status == "running" {
-					running++
-				}
-			}
-		}
-		cards = append(cards, card{c, len(cjs), running})
+		cards = append(cards, card{c, len(cjs), runningByCluster[c.ID]})
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -305,6 +291,25 @@ func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprint(w, renderCronJobRow(h.buildCronJobRow(ctx, clusterID, cj, runningCount, now)))
 	}
+}
+
+// runningCountByCluster returns the number of currently-running runs per
+// cluster ID, using a single GetRunningRuns query. CronJob IDs have the form
+// "clusterID/namespace/name", so the cluster is the first path segment.
+// This replaces the previous per-cronjob ListJobRuns fan-out (N+1) on the
+// dashboard and cluster JSON list.
+func (h *Handler) runningCountByCluster(ctx context.Context) map[string]int {
+	out := map[string]int{}
+	runs, err := h.store.GetRunningRuns(ctx)
+	if err != nil {
+		return out
+	}
+	for _, r := range runs {
+		if i := strings.IndexByte(r.CronJobID, '/'); i > 0 {
+			out[r.CronJobID[:i]]++
+		}
+	}
+	return out
 }
 
 func derefStr(s *string) string {

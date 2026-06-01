@@ -40,12 +40,3 @@ func (r *Registry) All() []*ClusterClient {
 	}
 	return out
 }
-
-// SetMetricsEnabled updates the MetricsEnabled flag for the given cluster.
-func (r *Registry) SetMetricsEnabled(id string, enabled bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if c, ok := r.clients[id]; ok {
-		c.MetricsEnabled = enabled
-	}
-}

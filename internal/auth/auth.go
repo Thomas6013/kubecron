@@ -27,6 +27,13 @@ type Config struct {
 	// 64 hex chars (32 bytes). If empty, a random key is generated at startup
 	// (sessions are lost on restart — acceptable for single-instance deploys).
 	SessionKey string `env:"OIDC_SESSION_KEY"`
+	// AllowedEmails, if non-empty, restricts login to these addresses (authz on
+	// top of authn). Empty = any account from the OIDC provider may log in.
+	AllowedEmails []string `env:"OIDC_ALLOWED_EMAILS" envSeparator:","`
+	// OperatorEmails, if non-empty, restricts mutating actions (suspend/resume/
+	// trigger) to these addresses; everyone else is read-only. Empty = every
+	// logged-in user may operate (backwards-compatible default).
+	OperatorEmails []string `env:"OIDC_OPERATOR_EMAILS" envSeparator:","`
 }
 
 const (
@@ -53,6 +60,27 @@ type Authenticator struct {
 	oauth2Cfg  oauth2.Config
 	sessionKey []byte
 	secure     bool // true when RedirectURL uses https — sets Secure flag on cookies
+
+	// allowedEmails gates login; operatorEmails gates mutating actions. A nil
+	// map means "no restriction" for that dimension.
+	allowedEmails  map[string]bool
+	operatorEmails map[string]bool
+}
+
+// emailSet builds a lookup set from a slice, returning nil (meaning "allow all")
+// when the slice is empty. Entries are lower-cased for case-insensitive matching.
+func emailSet(emails []string) map[string]bool {
+	if len(emails) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(emails))
+	for _, e := range emails {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" {
+			m[e] = true
+		}
+	}
+	return m
 }
 
 // session is stored in the signed cookie.
@@ -94,9 +122,40 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
-		sessionKey: sessKey,
-		secure:     strings.HasPrefix(cfg.RedirectURL, "https://"),
+		sessionKey:     sessKey,
+		secure:         strings.HasPrefix(cfg.RedirectURL, "https://"),
+		allowedEmails:  emailSet(cfg.AllowedEmails),
+		operatorEmails: emailSet(cfg.OperatorEmails),
 	}, nil
+}
+
+// IsAllowed reports whether email may log in. True when no allow-list is set.
+func (a *Authenticator) IsAllowed(email string) bool {
+	if a.allowedEmails == nil {
+		return true
+	}
+	return a.allowedEmails[strings.ToLower(email)]
+}
+
+// CanOperate reports whether email may perform mutating actions
+// (suspend/resume/trigger). True when no operator list is set.
+func (a *Authenticator) CanOperate(email string) bool {
+	if a.operatorEmails == nil {
+		return true
+	}
+	return a.operatorEmails[strings.ToLower(email)]
+}
+
+// RequireOperator wraps a handler so that only users permitted by CanOperate
+// may reach it; others receive 403. Used on mutating POST endpoints.
+func (a *Authenticator) RequireOperator(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.CanOperate(EmailFromContext(r.Context())) {
+			http.Error(w, "forbidden: read-only access", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Middleware returns an http.Handler that checks session cookies.
@@ -177,6 +236,13 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, "claims extraction failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Authorization gate: reject accounts not on the allow-list (if configured).
+	if !a.IsAllowed(claims.Email) {
+		slog.Warn("login denied: email not allowed", "email", claims.Email)
+		http.Error(w, "forbidden: this account is not authorized", http.StatusForbidden)
 		return
 	}
 
