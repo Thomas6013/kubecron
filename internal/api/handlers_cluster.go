@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -270,6 +271,17 @@ func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
 	clusterID := r.PathValue("clusterID")
 	ns := r.PathValue("ns")
 	ctx := r.Context()
+
+	// This endpoint serves a bare-<tr> fragment for HTMX polling only. If a real
+	// browser navigates here directly (bookmark, refresh, history restore, or a
+	// polling request that the browser promoted to a top-level navigation after
+	// the tab was suspended), there is no HX-Request header — serve the full,
+	// styled namespace page instead of unstyled naked rows.
+	if r.Header.Get("HX-Request") != "true" {
+		http.Redirect(w, r, fmt.Sprintf("/clusters/%s/cronjobs/%s",
+			url.PathEscape(clusterID), url.PathEscape(ns)), http.StatusSeeOther)
+		return
+	}
 
 	allCronJobs, err := h.store.ListCronJobs(ctx, clusterID)
 	if err != nil {
