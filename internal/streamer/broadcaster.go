@@ -54,15 +54,17 @@ func (b *Broadcaster) Subscribe(runID string) (ch <-chan string, unsub func()) {
 // Publish sends line to every subscriber of runID. The send is non-blocking:
 // if a subscriber's buffer is full the line is dropped for that subscriber
 // (slow-consumer protection).
+//
+// The whole publish runs under the read lock. This is what makes it safe:
+// unsub() and Close() take the write lock before they close a channel, so
+// they cannot run while a Publish holds the read lock — eliminating the
+// send-on-closed-channel panic. The send stays non-blocking (the `default`
+// branch), so holding the read lock never blocks on a slow consumer.
 func (b *Broadcaster) Publish(runID, line string) {
 	b.mu.RLock()
-	list := b.subs[runID]
-	// Snapshot the slice under RLock so we can release early.
-	snapshot := make([]chan string, len(list))
-	copy(snapshot, list)
-	b.mu.RUnlock()
+	defer b.mu.RUnlock()
 
-	for _, ch := range snapshot {
+	for _, ch := range b.subs[runID] {
 		select {
 		case ch <- line:
 		default:

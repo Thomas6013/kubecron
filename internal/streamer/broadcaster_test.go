@@ -99,3 +99,46 @@ func TestBroadcaster_ConcurrentPublishSubscribe(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestBroadcaster_PublishDuringUnsubClose is a regression test for BUG-13:
+// Publish must not panic when subscribers unsubscribe (channel close) or the
+// run is Closed concurrently. Run with -race to surface the interleaving.
+func TestBroadcaster_PublishDuringUnsubClose(t *testing.T) {
+	b := NewBroadcaster()
+	const runID = "run-close-race"
+	const iterations = 200
+
+	var wg sync.WaitGroup
+
+	// Continuously publish while subscribers churn underneath.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			b.Publish(runID, "line")
+		}
+	}()
+
+	// Continuously subscribe then unsub (which closes the channel) in parallel.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				_, unsub := b.Subscribe(runID)
+				unsub()
+			}
+		}()
+	}
+
+	// And Close the whole run repeatedly.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			b.Close(runID)
+		}
+	}()
+
+	wg.Wait()
+}

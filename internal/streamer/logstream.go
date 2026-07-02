@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,20 +118,29 @@ func (s *Streamer) streamLogs(ctx context.Context, clientset kubernetes.Interfac
 
 	lineCh := make(chan string, 256)
 
-	// Reader goroutine: scan lines and forward them to the main select loop.
+	// Reader goroutine: read lines and forward them to the main select loop.
+	// bufio.Reader.ReadString grows to fit arbitrarily long lines, unlike
+	// bufio.Scanner whose 64 KB default token cap would abort the *entire*
+	// remaining stream on a single over-long line (BUG-14).
 	go func() {
 		defer close(lineCh)
-		scanner := bufio.NewScanner(rc)
-		for scanner.Scan() {
-			line := scanner.Text()
-			select {
-			case lineCh <- line:
-			case <-ctx.Done():
+		reader := bufio.NewReader(rc)
+		for {
+			raw, err := reader.ReadString('\n')
+			if len(raw) > 0 {
+				line := strings.TrimRight(raw, "\r\n")
+				select {
+				case lineCh <- line:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					slog.Warn("log reader error", "runID", runID, "err", err)
+				}
 				return
 			}
-		}
-		if err := scanner.Err(); err != nil && err != io.EOF {
-			slog.Warn("log scanner error", "runID", runID, "err", err)
 		}
 	}()
 

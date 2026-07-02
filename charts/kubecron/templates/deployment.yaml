@@ -7,6 +7,12 @@ metadata:
     {{- include "kubecron.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): the single replica holds a ReadWriteOnce PVC
+  # with a single-writer SQLite/WAL database. RollingUpdate would try to start
+  # the new pod before terminating the old one, causing a Multi-Attach volume
+  # error and a stalled rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "kubecron.selectorLabels" . | nindent 6 }}

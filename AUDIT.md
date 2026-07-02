@@ -502,3 +502,149 @@ The var existed in code but was absent from `values.yaml`/`deployment.yaml` and 
 
 ## 🎯 Product / MVP note
 The idea is strong and well-differentiated (historical, cross-cluster CronJob visibility — a real gap `kubectl`/k9s/Lens don't fill), and the execution (informers → SQLite → SSE → server-rendered HTML, single binary) is appropriately scoped. With BUG-11/BUG-12 fixed, the two headline features (resource tracking, duration trends) actually work now. The remaining highest-value gap for "usable by a team" is **failure alerting / webhooks** — monitoring without notification still requires someone watching the screen. Recommend that next, ahead of more UI.
+
+---
+
+# Session 5 — 2026-07-02 (read-only re-audit — findings only, no code changed)
+
+Fresh full re-read of the tree. All Session 1–4 fixes verified still in place. One **new confirmed HIGH concurrency bug** stands out (a panic-inducing data race in the log broadcaster that the existing test can flake on), plus several MEDIUM operational/robustness issues and a batch of LOW convention/hardening gaps. The Session 4 carry-over list is still open.
+
+**Fixes applied this session:** BUG-13, BUG-14, CI-1, INFRA-1 (the agreed top-4). Build, `go vet`, `go test ./...`, and `helm lint` all pass. The remaining findings below are documented for triage.
+
+## 🐛 Bugs
+
+### ✅ BUG-13 — `Broadcaster.Publish` can panic: send on closed channel *(fixed 2026-07-02)*
+**File:** `internal/streamer/broadcaster.go:57-72`
+
+`Publish` snapshots the subscriber slice under `RLock`, **releases the lock**, then sends on each channel:
+
+```go
+b.mu.RLock()
+snapshot := make([]chan string, len(list)); copy(snapshot, list)
+b.mu.RUnlock()
+for _, ch := range snapshot {
+    select {
+    case ch <- line:   // ❌ ch may already be closed by a concurrent unsub()/Close()
+    default:
+    }
+}
+```
+
+Meanwhile `unsub()` (line 41) and `Close()` (line 83) take the write lock and `close(ch)`. Between the snapshot and the send, a concurrent unsub/close can close a channel still held in `snapshot`. **Sending on a closed channel panics** — and `select { case ch <- line: default: }` does *not* save you: a send on a closed channel panics even inside a `select`. The `default` only guards a *full* channel, not a *closed* one.
+
+**Trigger in production:** an SSE viewer disconnects (→ `unsub`) or the run finishes (→ `Close`) at the same moment `logstream` publishes a line — i.e. exactly the normal case of a client closing the log page while a job is still emitting output. The panic propagates on the streamer goroutine and crashes the process (no recover in that path).
+
+**Test smell:** `broadcaster_test.go:63 TestBroadcaster_ConcurrentPublishSubscribe` runs 4 publishers × 4 subscribers with `defer unsub()`; it can already flake/panic under `-race`, which is precisely why the flake hasn't been noticed (`-race` isn't run — CGO disabled on Windows, and CI doesn't run it either).
+
+**Fix applied:** option (a) — `Publish` now runs entirely under `RLock` (`defer b.mu.RUnlock()`), so `unsub()`/`Close()` (which hold the write lock) cannot close a channel mid-publish. The send stays non-blocking via the `default` branch, so holding the read lock never blocks on a slow consumer. Regression test `TestBroadcaster_PublishDuringUnsubClose` interleaves Publish with concurrent unsub/Close (meaningful under `-race`, now wired in CI — see CI-1).
+
+---
+
+### ✅ BUG-14 — Log stream aborts on lines > 64 KB (`bufio.Scanner` default cap) *(fixed 2026-07-02)*
+**File:** `internal/streamer/logstream.go:123`
+
+```go
+scanner := bufio.NewScanner(rc)
+for scanner.Scan() { ... }
+```
+
+`bufio.Scanner` has a default max token size of 64 KB. A single log line longer than that makes `Scan()` return `false` with `bufio.ErrTooLong`; the error is logged as a warning (line 132-134) and **the entire remaining log stream for that run stops** — not just the one line. CronJobs that emit long lines (JSON blobs, stack traces, base64 payloads) get truncated log capture with no user-visible reason.
+
+**Fix applied:** replaced the `bufio.Scanner` with a `bufio.Reader` + `ReadString('\n')` loop, which grows to fit arbitrarily long lines and never aborts the remaining stream (trailing `\r\n` trimmed to preserve prior line semantics).
+
+---
+
+### 🟠 BUG-15 — Foreign-key insert ordering can drop runs *(plausible — needs runtime confirmation)*
+**Files:** `migrations/000001_init.up.sql:26`, `internal/storage/db.go` (`PRAGMA foreign_keys=ON`)
+
+`job_runs.cronjob_id REFERENCES cronjobs(id) ON DELETE CASCADE` with FK enforcement enabled. Informer sync order between the CronJob and Job caches is not guaranteed; if a `Job.OnAdd` fires (and `UpsertJobRun` runs) **before** the owning CronJob row has been upserted, the FK constraint rejects the insert and the run is silently lost (error logged, no retry). Most likely on a cold start with many CronJobs, or for a manually-triggered run whose pre-insert races the cronjob sync.
+
+**Fix:** upsert a minimal `cronjobs` row before the first `UpsertJobRun` for that cronjob_id, or make the run→cronjob link soft (no FK / `ON DELETE SET NULL` and tolerate a nullable cronjob_id). Confirm empirically with a seeded DB before choosing.
+
+## 🔒 Security / hardening
+
+### 🟡 SEC-16 — Raw Kubernetes error returned to HTTP client
+**File:** `internal/api/handlers_cronjob.go:93,103`
+
+`Suspend`/`Resume` do `writeError(w, http.StatusInternalServerError, err.Error())`, leaking the raw client-go/apiserver error string to the browser. This violates the CLAUDE.md convention *"never return raw K8s API or DB errors to HTTP clients — log with `slog.Error()`, return 500."* Log the detail, return a generic message.
+
+### 🟡 SEC-17 — Kubeconfig path logged
+**File:** `internal/cluster/manager.go:77,81`
+
+Both error branches log `"path", kubeconfigPath`. The Security Model in CLAUDE.md states kubeconfig data is *"never logged server-side"*; the file path (which can encode cluster/account naming) is logged on every load error. Drop the `path` field and keep only the `cluster` ID.
+
+### 🟡 SEC-18 — Over-broad RBAC vs. documented least-privilege
+**File:** `charts/kubecron/templates/clusterrole.yaml:9-11`
+
+```yaml
+- apiGroups: ["batch"]
+  resources: ["cronjobs", "jobs"]
+  verbs: ["get","list","watch","patch","create"]
+```
+
+This grants `patch` **and** `create` on **both** `cronjobs` and `jobs`. The documented security model is `patch` on CronJobs (suspend/resume) and `create` on Jobs (trigger) only. As written, the SA can also `create` CronJobs and `patch` Jobs — more than the app needs. Split into two rules matching actual usage.
+
+### 🟠 SEC-19 — Rate limiter: unbounded map + ineffective behind ingress
+**File:** `internal/api/rate_limiter.go`
+
+Two issues: (1) `buckets map[string]*rateBucket` is **never evicted** — expired entries are overwritten only if that same IP returns, so a stream of distinct source IPs grows the map without bound (slow memory leak / minor DoS surface). (2) The key is `r.RemoteAddr`, which behind an ingress/reverse proxy is the proxy's IP — so all clients share one bucket (over-limiting) or the limit is trivially bypassed, depending on topology. **Fix:** sweep expired buckets periodically (or lazily on `allow`), and derive the client IP from a trusted `X-Forwarded-For`/`X-Real-IP` when a proxy is configured.
+
+## 🚀 Infra / operations
+
+### ✅ INFRA-1 — Deployment default RollingUpdate + RWO PVC + SQLite → rollout deadlock *(fixed 2026-07-02)*
+**File:** `charts/kubecron/templates/deployment.yaml:8-9`
+
+`replicas: 1` with a default (RollingUpdate) strategy and a `ReadWriteOnce` PVC holding the SQLite DB. On upgrade, RollingUpdate tries to start the **new** pod before terminating the old one (`maxSurge=25%`→1). The new pod cannot mount the RWO volume while the old pod still holds it (Multi-Attach error) → rollout stalls; even if scheduled to the same node, two processes briefly contend for the single-writer WAL DB. **Fix applied:** set `spec.strategy.type: Recreate` (correct for a single-writer, single-replica stateful app).
+
+## 📈 Observability
+
+### 🟡 OBS-1 — Prometheus gauges never cleared → stale series
+**File:** `internal/metrics/metrics.go` + `internal/watcher/cronjob.go`
+
+The per-cronjob gauges (`kubecron_cronjob_suspended`, `kubecron_next_run_timestamp`, `kubecron_last_run_*`) are set on Add/Update but never deleted when a CronJob is removed (`CronJobHandler.OnDelete` is a no-op — see DEAD-4). Deleted CronJobs keep exporting their last value forever (stale series / misleading dashboards & alerts). `next_run_timestamp` also goes stale after the scheduled time passes until the next informer event. **Fix:** `DeleteLabelValues` for the cronjob's label set in `OnDelete`.
+
+## ⚙️ CI/CD
+
+### ✅ CI-1 — CI does not run on pull requests; no `-race`, no coverage *(fixed 2026-07-02)*
+**File:** `.github/workflows/ci.yml:3-5`
+
+```yaml
+on:
+  push:
+    branches: [main]
+```
+
+There is **no `pull_request` trigger** — build/vet/test/lint never gate a PR, only post-merge pushes to `main`. This contradicts CLAUDE.md ("`ci.yml` runs on push/PR to `main`"). Also `go test ./...` runs without `-race`, so the BUG-13 broadcaster race can never be caught in CI. **Fix applied:** added `pull_request: branches: [main]`, and a `go test -race ./...` step with `CGO_ENABLED=1` (the race detector needs a C toolchain, present on `ubuntu-latest`; the production binary is still built `CGO_ENABLED=0`). Still open: SEC-8 (GHA pinned by major tag — `checkout@v7`, `setup-go@v6`, `setup-helm@v5`), SEC-9 (`golangci-lint@latest`, line 25) — both re-confirmed open; coverage reporting not added.
+
+## ✅ Carry-overs re-verified (still open)
+- **SEC-7** Dockerfile floating tags · **SEC-8** GHA major-tag pins · **SEC-9** `golangci-lint@latest` · **SEC-10** missing `seccompProfile: RuntimeDefault` · **SEC-14** CSRF cookie missing `Secure` · **SEC-15** CDN scripts lack SRI · **SEC-13 UI follow-up** (action buttons still shown to read-only users).
+- **BUG-7** partial log state on fail · **BUG-8** logs lost on retry · **BUG-9** heatmap UTC-only · **BUG-10** no log retry for empty `succeeded` runs.
+- **PERF-2** 10 s poll re-computes `buildCronJobRow` (4 store calls/cronjob) per viewer — no snapshot cache.
+- **MAINT-7** duplicated suspend/resume/trigger button HTML.
+- **Tests**: no `-race` in CI (see CI-1); no `internal/api` handler test for the read-only-vs-operator gate; broadcaster concurrency test needs `-race` to be meaningful.
+
+## 🎬 Top 4 highest-leverage next moves — all done this session
+
+| # | Action | Why | Status |
+|---|---|---|---|
+| 1 | Fix `Broadcaster.Publish` send-on-closed-channel race (BUG-13) | Real production panic — client disconnect during active streaming crashes the process | ✅ Fixed 2026-07-02 |
+| 2 | Add `pull_request` trigger + `-race` test job to CI (CI-1) | Gates PRs and would actually catch BUG-13-class races going forward | ✅ Fixed 2026-07-02 |
+| 3 | Set Deployment `strategy: Recreate` (INFRA-1) | Prevents upgrade deadlock on RWO PVC + SQLite | ✅ Fixed 2026-07-02 |
+| 4 | Lift `bufio.Scanner` line cap (BUG-14) | Silent log truncation on long lines is invisible data loss | ✅ Fixed 2026-07-02 |
+
+**Next up (unaddressed):** SEC-19 (rate-limiter map growth + proxy IP), BUG-15 (FK insert ordering — confirm empirically first), then the LOW hardening batch (SEC-16/17/18, OBS-1) and the Session-4 carry-overs (SEC-7/8/9/10/14/15, BUG-7/8/9/10, PERF-2, MAINT-7).
+
+## 🧮 Score — 7.5 / 10
+Strong, well-scoped engineering with a healthy audit trajectory: the genuinely dangerous issues from earlier sessions (XSS, silent data loss, missing auth, dead headline features) are fixed and verified. What holds it back from 8+: one **confirmed HIGH concurrency panic** on a hot path (BUG-13), a cluster of **MEDIUM operational robustness gaps** (log truncation, rollout deadlock, rate-limiter growth, FK ordering), and a **CI that doesn't gate PRs or run `-race`** — meaning this class of bug can't currently be caught automatically. Close BUG-13 + CI-1 together and this moves to ~8.5.
+
+## Findings Summary — cumulative
+| Category | 🔴 | 🟠 | 🟡 | Total |
+|---|---|---|---|---|
+| Security | 3 | 10 | 3 | 16 |
+| Bugs | 2 | 4 | 3 | 9 open of 15 raised |
+| Infra / CI | 0 | 2 | 0 | 2 |
+| Observability | 0 | 0 | 1 | 1 |
+| Performance | 0 | 0 | 1 | 1 (PERF-2 open) |
+
+**Session 5 new IDs:** BUG-13 (🔴), BUG-14 (🟠), BUG-15 (🟠), SEC-16/17/18 (🟡), SEC-19 (🟠), INFRA-1 (🟠), OBS-1 (🟡), CI-1 (🟠).
+**Fixed this session:** BUG-13, BUG-14, CI-1, INFRA-1. **Still open:** BUG-15, SEC-16/17/18/19, OBS-1 + all Session-4 carry-overs.
