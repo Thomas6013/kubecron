@@ -58,6 +58,19 @@ func Recover(next http.Handler) http.Handler {
 	})
 }
 
+// SecurityHeaders sets baseline hardening headers on every response.
+// CSP and HSTS are intentionally not set here: the UI relies on inline
+// scripts (CSP needs a nonce refactor) and TLS is terminated by the ingress.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Chain applies middlewares in order (first middleware is the outermost wrapper).
 func Chain(h http.Handler, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	// Apply in reverse so that the first middleware in the list is executed first.

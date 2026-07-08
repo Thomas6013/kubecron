@@ -11,22 +11,26 @@ const (
 	csrfHeaderName = "X-CSRF-Token"
 )
 
-// EnsureCSRFCookie sets a CSRF cookie on every response if one is not already
-// present. The cookie is not HttpOnly so that the HTMX event handler in
-// htmlHead can read it and attach it to POST requests.
-func EnsureCSRFCookie(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := r.Cookie(csrfCookieName); err != nil {
-			http.SetCookie(w, &http.Cookie{
-				Name:     csrfCookieName,
-				Value:    newCSRFToken(),
-				Path:     "/",
-				SameSite: http.SameSiteStrictMode,
-				HttpOnly: false,
-			})
-		}
-		next.ServeHTTP(w, r)
-	})
+// EnsureCSRFCookie returns a middleware that sets a CSRF cookie on every
+// response if one is not already present. The cookie is not HttpOnly so that
+// the HTMX event handler in htmlHead can read it and attach it to POST
+// requests. secure should be true when the app is served over HTTPS.
+func EnsureCSRFCookie(secure bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := r.Cookie(csrfCookieName); err != nil {
+				http.SetCookie(w, &http.Cookie{
+					Name:     csrfCookieName,
+					Value:    newCSRFToken(),
+					Path:     "/",
+					SameSite: http.SameSiteStrictMode,
+					HttpOnly: false,
+					Secure:   secure,
+				})
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // CSRFProtect validates the X-CSRF-Token request header against the

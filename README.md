@@ -19,7 +19,9 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 **KubeCron** gives you a single pane of glass:
 
 - **Live log streaming** — watch CronJob pod logs in real time as they execute, via SSE
+- **Log tooling** — severity colorization, regex search with highlighting, plain-text `.log` download
 - **Run history** — every execution recorded with status, duration, exit code, and retry count
+- **History visuals** — duration sparkline per CronJob, 90-day calendar heatmap with click-to-filter, missed/concurrent run badges
 - **Resource usage** — CPU and memory sampled every 15 s when metrics-server is available; avg/max computed per run
 - **7-day statistics** — success rate, average and max duration per CronJob
 - **Next-run countdown** — computed from the cron expression, updated live in the browser
@@ -170,6 +172,7 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 | `POST` | `/api/clusters/{id}/cronjobs/{ns}/{name}/trigger` | Trigger a manual run |
 | `GET` | `/api/runs/{id}/stream` | SSE stream of live log lines |
 | `GET` | `/api/runs/{id}/resources` | Resource sample time-series |
+| `GET` | `/api/runs/{id}/logs.txt` | Plain-text log download |
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/healthz` | Health check (always 200) |
 | `GET` | `/readyz` | Readiness (200 when informer caches synced) |

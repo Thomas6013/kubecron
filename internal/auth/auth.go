@@ -129,6 +129,11 @@ func NewAuthenticator(ctx context.Context, cfg Config) (*Authenticator, error) {
 	}, nil
 }
 
+// Secure reports whether the app is served over HTTPS (derived from the OIDC
+// redirect URL). Used to set the Secure flag on cookies issued outside this
+// package (e.g. the CSRF cookie).
+func (a *Authenticator) Secure() bool { return a.secure }
+
 // IsAllowed reports whether email may log in. True when no allow-list is set.
 func (a *Authenticator) IsAllowed(email string) bool {
 	if a.allowedEmails == nil {
@@ -259,9 +264,16 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleLogout clears the session cookie and shows the logged-out page.
+// POST-only (CSRF-protected); the nav button sends it via HTMX, so an
+// HX-Redirect header is used to navigate the full page.
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", MaxAge: -1, Path: "/", Secure: a.secure})
-	http.Redirect(w, r, "/auth/logged-out", http.StatusFound)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", MaxAge: -1, Path: "/", HttpOnly: true, Secure: a.secure})
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/auth/logged-out")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/auth/logged-out", http.StatusSeeOther)
 }
 
 // HandleLoggedOut renders a simple page with a login button.

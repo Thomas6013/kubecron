@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -89,32 +88,27 @@ func (h *Handler) ListCronJobs(w http.ResponseWriter, r *http.Request) {
 // Suspend handles POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/suspend.
 // It patches the CronJob in Kubernetes to set spec.suspend=true.
 func (h *Handler) Suspend(w http.ResponseWriter, r *http.Request) {
-	if err := patchSuspend(r.Context(), h, r, true); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	h.patchSuspend(w, r, true)
 }
 
 // Resume handles POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume.
 // It patches the CronJob in Kubernetes to set spec.suspend=false.
 func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
-	if err := patchSuspend(r.Context(), h, r, false); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	h.patchSuspend(w, r, false)
 }
 
-// patchSuspend performs the Kubernetes MergePatch to flip spec.suspend.
-func patchSuspend(ctx context.Context, h *Handler, r *http.Request, suspend bool) error {
+// patchSuspend performs the Kubernetes MergePatch to flip spec.suspend and
+// writes the HTTP response. Raw K8s errors are logged, never returned to the
+// client.
+func (h *Handler) patchSuspend(w http.ResponseWriter, r *http.Request, suspend bool) {
 	clusterID := r.PathValue("clusterID")
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
 
 	cl, ok := h.registry.Get(clusterID)
 	if !ok {
-		return fmt.Errorf("cluster %q not found", clusterID)
+		writeError(w, http.StatusNotFound, "cluster not found")
+		return
 	}
 
 	suspendValue := "true"
@@ -123,10 +117,15 @@ func patchSuspend(ctx context.Context, h *Handler, r *http.Request, suspend bool
 	}
 	patch := []byte(`{"spec":{"suspend":` + suspendValue + `}}`)
 
-	_, err := cl.Clientset.BatchV1().CronJobs(ns).Patch(
-		ctx, name, types.MergePatchType, patch, metav1.PatchOptions{},
-	)
-	return err
+	if _, err := cl.Clientset.BatchV1().CronJobs(ns).Patch(
+		r.Context(), name, types.MergePatchType, patch, metav1.PatchOptions{},
+	); err != nil {
+		slog.Error("failed to patch cronjob suspend",
+			"cluster", clusterID, "namespace", ns, "name", name, "suspend", suspend, "err", err)
+		writeError(w, http.StatusInternalServerError, "failed to update cronjob")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // triggerResponse is the JSON body returned by the trigger endpoint.

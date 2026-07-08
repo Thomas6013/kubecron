@@ -32,7 +32,7 @@ func htmlHead(title, userEmail string) string {
 	if userEmail != "" {
 		navRight = `<div style="margin-left:auto;display:flex;align-items:center;gap:10px;">` +
 			`<span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);">` + esc(userEmail) + `</span>` +
-			`<a href="/auth/logout" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);text-decoration:none;border:1px solid var(--border);padding:2px 10px;border-radius:4px;">logout</a>` +
+			`<button hx-post="/auth/logout" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);background:none;cursor:pointer;border:1px solid var(--border);padding:2px 10px;border-radius:4px;">logout</button>` +
 			`</div>`
 	}
 	_ = title

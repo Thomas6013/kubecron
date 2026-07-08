@@ -64,7 +64,8 @@ func (s *Server) Start(port int) error {
 	if s.authenticator != nil {
 		mux.Handle("GET /auth/login", loginLimiter(http.HandlerFunc(s.authenticator.HandleLogin)))
 		mux.HandleFunc("GET /auth/callback", s.authenticator.HandleCallback)
-		mux.HandleFunc("GET /auth/logout", s.authenticator.HandleLogout)
+		// POST (not GET): logout is state-changing and must be CSRF-protected.
+		mux.HandleFunc("POST /auth/logout", s.authenticator.HandleLogout)
 		mux.HandleFunc("GET /auth/logged-out", s.authenticator.HandleLoggedOut)
 	}
 
@@ -100,7 +101,8 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /", h.Dashboard)
 
 	// Build middleware chain; prepend OIDC middleware if enabled.
-	middlewares := []func(http.Handler) http.Handler{Logger, Recover, EnsureCSRFCookie, CSRFProtect}
+	secureCookies := s.authenticator != nil && s.authenticator.Secure()
+	middlewares := []func(http.Handler) http.Handler{Logger, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
 	if s.authenticator != nil {
 		middlewares = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, middlewares...)
 	}
@@ -109,6 +111,9 @@ func (s *Server) Start(port int) error {
 	s.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: handler,
+		// No WriteTimeout: SSE streams (/api/runs/{id}/stream) are long-lived.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	return s.httpServer.ListenAndServe()

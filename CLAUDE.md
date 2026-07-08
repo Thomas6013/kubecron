@@ -12,10 +12,10 @@ KubeCron is a **single-binary Go application** that monitors Kubernetes CronJob 
 - **UI rendering**: Raw HTML via `fmt.Fprintf` in `internal/api/html.go` + `html_components.go` — no template engine, no Node.js build step
 - **Database**: SQLite via `modernc.org/sqlite` (pure Go, no CGO, WAL mode, embedded migrations)
 - **Kubernetes**: `k8s.io/client-go` informers (CronJob, Job, Pod), MetricsClient for resource sampling
-- **Frontend**: HTMX 2.x + Tailwind CDN + Chart.js — no Node.js build step
+- **Frontend**: HTMX 2.x (CDN) + custom CSS (`internal/ui/static/app.css`, embedded) + Chart.js (CDN) — no Node.js build step
 - **Auth**: OIDC optional (`coreos/go-oidc/v3` + `golang.org/x/oauth2`); HMAC-signed session cookie, 24 h TTL
 - **Metrics**: Prometheus via `prometheus/client_golang`; 6 wired metrics exposed at `/metrics`
-- **Infra**: Single-stage Dockerfile → `gcr.io/distroless/static:nonroot`, multi-arch (amd64+arm64), CI with golangci-lint + SBOM + cosign
+- **Infra**: Two-stage Dockerfile (`golang:1.26-alpine` build → `gcr.io/distroless/static:nonroot`), CI with golangci-lint + SBOM + cosign; images currently `linux/amd64` only (arm64 planned — AUDIT INFRA-3)
 
 ---
 
@@ -28,7 +28,9 @@ cmd/kubecron/
 internal/
   api/
     server.go                 # HTTP server setup, route registration
-    middleware.go             # Logging, recovery, CORS, auth middleware
+    middleware.go             # Logging, recovery, auth middleware
+    csrf.go                   # CSRF double-submit cookie protection
+    rate_limiter.go           # Fixed-window rate limiter (login, trigger)
     handlers_cluster.go       # Dashboard, ClusterDetail, NamespaceDetail pages
     handlers_cronjob.go       # Suspend/resume/trigger endpoints
     handlers_runs.go          # Run list, run detail, SSE stream, log download
@@ -44,7 +46,6 @@ internal/
     client.go                 # ClusterClient (Clientset + InformerFactory + MetricsClient)
     registry.go               # Thread-safe cluster registry
   watcher/
-    controller.go             # Per-cluster informer controller
     controller.go             # Per-cluster informer controller
     cronjob.go                # CronJob informer event handlers
     job.go                    # Job informer event handlers (run tracking)
@@ -118,6 +119,8 @@ See `.env.example`. Key variables:
 | `OIDC_CLIENT_SECRET` | _(empty)_ | OIDC client secret (store in K8s Secret) |
 | `OIDC_REDIRECT_URL` | _(empty)_ | `https://<host>/auth/callback` — must be HTTPS |
 | `OIDC_SESSION_KEY` | _(empty)_ | Any string ≥32 chars; SHA-256 derived internally (store in K8s Secret) |
+| `OIDC_ALLOWED_EMAILS` | _(empty)_ | Comma-separated allow-list of emails permitted to log in (empty = any account) |
+| `OIDC_OPERATOR_EMAILS` | _(empty)_ | Comma-separated emails allowed to suspend/resume/trigger; others read-only (empty = all operators) |
 
 ---
 
@@ -141,24 +144,44 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 - **Distroless image** — `gcr.io/distroless/static:nonroot`; runs as non-root.
 - **No CGO** — `CGO_ENABLED=0`; pure Go binary.
 - **OIDC session** — signed session cookie; session key stored in K8s Secret; never logged.
+- **Authorization** — optional login allow-list (`OIDC_ALLOWED_EMAILS`) and operator role (`OIDC_OPERATOR_EMAILS`) restricting suspend/resume/trigger; others read-only.
+- **CSRF & rate limiting** — double-submit cookie validated on every POST; fixed-window rate limits on `/auth/login` (10/min) and trigger (20/min) per source IP.
 - **Kubeconfig data** — never logged server-side.
 
 ---
 
 ## Known Issues & Backlog
 
-### Performance — Medium Priority
+Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
-- **Log lines stored in SQLite** — for high-volume CronJobs, the `log_lines` table can grow large before retention kicks in. Planned: S3 log storage backend.
+### Correctness & Domain — Medium Priority
 
-### Testing — Medium Priority
+- **DOM-1** — CronJob `spec.timeZone` is ignored; next-run countdown and "missed" detection are computed in server TZ.
+- **BUG-20** — deleted CronJobs/clusters are never removed or marked in the DB: ghost rows in the UI, stale Prometheus series.
 
-- **Partial test coverage** — schedule, auth, storage, broadcaster, watcher (JobHandler) covered. Still missing: HTTP handler integration tests, `go test -race` (requires CGO, run in Linux CI).
+### Security — Medium Priority
+
+- **SEC-22** — htmx/Chart.js/fonts loaded from CDNs without SRI; breaks air-gapped installs. Fix: vendor into `internal/ui/static/`.
 
 ### Security — Low Priority
 
-- **Base images use floating tags** — `golang:1.26` and `gcr.io/distroless/static:nonroot` in Dockerfile. Fix: pin with `@sha256:...`.
-- **Missing `seccompProfile: RuntimeDefault`** in `charts/kubecron/templates/deployment.yaml`. Fix: add to pod security context.
+- **SEC-23 (partial)** — nosniff/XFO/Referrer-Policy shipped; CSP (needs inline-script nonce refactor) and HSTS still missing.
+- **SEC-24** — rate limiter proxy-blind (`RemoteAddr` behind ingress = collective lockout) with unbounded bucket map.
+- **INFRA-1** — base images use floating tags. Fix: pin with `@sha256:...`.
+
+### Infra & CI — Medium Priority
+
+- **INFRA-3** — release images are `linux/amd64` only; the arm64 claim is not implemented in `docker-publish.yml` (no QEMU step). Implement or drop the claim.
+- **INFRA-5** — CI is skipped entirely for `renovate[bot]`; once Renovate is enabled its PRs would merge untested.
+
+### Performance — Medium Priority
+
+- **PERF-1** — log lines stored in SQLite; `log_lines` can grow large before retention. Planned: S3 log storage backend.
+- **PERF-2** — cluster pages issue 3 queries per CronJob per render, re-run every 10 s per open tab (HTMX poll).
+
+### Testing — Medium Priority
+
+- **TEST-1** — schedule, auth, storage, broadcaster, watcher (JobHandler), HTTP handlers covered; `go test -race` runs in CI (`ci.yml`). Still missing: CronJobHandler/PodHandler, sampler, Streamer, cluster.Manager; no coverage threshold.
 
 ---
 
@@ -177,12 +200,10 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 ## CI/CD Notes
 
-- `ci.yml` runs on push/PR to `main`: `go build`, `go vet`, `go test`, `golangci-lint`. Skipped for `renovate[bot]`.
-- `docker-publish.yml` builds and pushes to `ghcr.io/thomas6013/kubecron` on `*.*.*` tag push only.
-- Image tags: `latest`, `<git-tag>`, `<commit-sha>`.
-- Multi-arch: `linux/amd64` + `linux/arm64` via QEMU + buildx.
-- SBOM generated per image with `anchore/sbom-action` (SPDX format).
-- Images signed with `sigstore/cosign` (keyless, OIDC-based).
+- `ci.yml` runs on push/PR to `main`: `go build`, `go vet`, `go test` (+ `-race`), `golangci-lint`, `helm lint`. Skipped for `renovate[bot]` (see AUDIT INFRA-5).
+- `docker-publish.yml` pushes to `ghcr.io/thomas6013/kubecron` on **every push to `main`** (tags `main`, `<commit-sha>`) and on `*.*.*` tag push (tags `latest`, `<git-tag>`, `<commit-sha>`).
+- Platforms: `linux/amd64` only for now (arm64 pending — AUDIT INFRA-3).
+- SBOM generated per release image with `anchore/sbom-action` (SPDX); release images signed with `sigstore/cosign` (keyless, OIDC-based).
 
 ---
 
@@ -219,6 +240,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
    The `docker-publish.yml` workflow triggers automatically on `*.*.*` tag push.
 
 ### Common pitfalls
-- Docker images publish **only on tag push** — the tag must exactly match the version bump
+- Release image tags (`latest`, `<version>`) publish **only on tag push** — the tag must exactly match the version bump (`main`/`<sha>` tags also publish on every main push)
 - `helm lint` is now in CI (`helm-lint` job) — run it locally first to avoid a wasted CI run
 - New Prometheus metrics must be wired (incremented/set) in the appropriate watcher or handler — declaring them in `metrics.go` is not enough

@@ -5,7 +5,7 @@ Items are not committed to any timeline — this is a solo side project.
 
 ## Infrastructure & Distribution
 
-- [x] **Multi-arch Docker builds** — `linux/amd64` + `linux/arm64` _(v0.0.1)_
+- [ ] **Multi-arch Docker builds** — `linux/arm64` was claimed but `docker-publish.yml` builds `linux/amd64` only (no QEMU step); re-add arm64 to the release build _(AUDIT INFRA-3)_
 - [x] **Distroless runtime image** — `gcr.io/distroless/static:nonroot` _(v0.0.1)_
 - [x] **Helm chart** — parameterized chart with ingress, TLS, resource limits, OIDC secrets, retention _(v0.0.1)_
 - [ ] **Publish Helm chart to OCI / Artifact Hub** — push `charts/kubecron` to GHCR OCI registry and submit to Artifact Hub
@@ -20,6 +20,7 @@ Items are not committed to any timeline — this is a solo side project.
 - [x] **Resource tracking** — CPU/memory sampled via metrics-server, avg/max per run _(v0.0.1)_
 - [x] **Suspend / Resume / Trigger** — CronJob control from the dashboard _(v0.0.1)_
 - [x] **OIDC authentication** _(v0.0.1)_
+- [x] **OIDC authorization** — login allow-list (`OIDC_ALLOWED_EMAILS`) + operator role for suspend/resume/trigger (`OIDC_OPERATOR_EMAILS`) _(unreleased)_
 - [x] **Prometheus metrics** _(v0.0.1)_
 - [x] **Missed run detection** — `missed` badge when a CronJob skipped a scheduled tick _(v0.1.0)_
 - [x] **Concurrent run detection** — `⚠ concurrent` badge when multiple runs are active simultaneously _(v0.1.0)_
@@ -34,15 +35,21 @@ Items are not committed to any timeline — this is a solo side project.
 - [x] **Pagination** — cursor-based "Load more" for run history; heatmap click-to-filter by day; blue "running" tile indicator _(unreleased)_
 - [ ] **CronJob annotations** — display description, owner, runbook link from K8s annotations
 - [ ] **Dark / light mode toggle**
+- [ ] **Timezone-aware schedules** — honour CronJob `spec.timeZone` in next-run and missed detection _(AUDIT DOM-1)_
+- [ ] **Deleted-object cleanup** — mark CronJobs/clusters removed from the cluster as deleted (hide from UI, drop Prometheus series) _(AUDIT BUG-20)_
 
 ## Code Quality
 
 - [x] **golangci-lint in CI** _(v0.0.1)_
 - [x] **helm lint in CI** _(v0.0.1)_
-- [x] **Unit tests (partial)** — schedule, auth HMAC, storage, broadcaster, watcher (JobHandler) covered _(unreleased)_; HTTP handler integration tests still pending
-- [ ] **Integration tests** — informer event handling with `k8s.io/client-go/kubernetes/fake`
-- [ ] **Renovate** — automated dependency updates for Go modules and GitHub Actions
-- [ ] **seccompProfile: RuntimeDefault** — add to pod security context in k8s/ and Helm chart
+- [x] **Unit tests (partial)** — schedule, auth HMAC, storage, broadcaster, watcher (JobHandler), HTTP handlers (`internal/api`) covered _(unreleased)_
+- [ ] **Integration tests** — CronJob and Pod informer event handling with `k8s.io/client-go/kubernetes/fake` (JobHandler already covered)
+- [ ] **Renovate** — automated dependency updates for Go modules and GitHub Actions; also remove the `renovate[bot]` CI skip so its PRs are tested _(AUDIT INFRA-5)_
+- [x] **seccompProfile: RuntimeDefault** — added to pod security context in `values.yaml` _(AUDIT INFRA-2, unreleased)_
+- [x] **Security hardening batch** — HTTP server timeouts, generic errors on suspend/resume, nosniff/XFO/Referrer-Policy headers, CSRF `Secure` flag + POST logout, split ClusterRole verbs _(AUDIT SEC-20/21/23-partial/25/26, unreleased)_
+- [ ] **CSP + HSTS** — remaining SEC-23 headers; CSP requires moving inline scripts to nonce'd blocks
+- [ ] **Vendor frontend assets** — embed htmx + Chart.js instead of CDN (SRI/supply chain, air-gapped installs) _(AUDIT SEC-22)_
+- [ ] **Pin golangci-lint + add `.golangci.yml`** — CI currently installs `@latest` _(AUDIT INFRA-4)_
 
 ## Documentation
 

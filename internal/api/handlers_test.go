@@ -367,8 +367,8 @@ func TestSuspend_ClusterNotFound(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.Suspend(w, r)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("want 500, got %d", w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", w.Code)
 	}
 }
 

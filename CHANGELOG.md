@@ -7,6 +7,12 @@ All notable changes to KubeCron are documented here.
 ## [Unreleased]
 
 ### Security
+- **HTTP server timeouts** — `ReadHeaderTimeout` 10 s + `IdleTimeout` 120 s on the listener (Slowloris hardening); no `WriteTimeout` so SSE streams stay long-lived (SEC-20)
+- **Generic errors on suspend/resume** — raw Kubernetes errors are now logged server-side and never returned to HTTP clients; unknown cluster returns 404 instead of 500 (SEC-21)
+- **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` on every response (SEC-23, partial — CSP/HSTS deferred)
+- **CSRF cookie `Secure` flag** — set when the app is served over HTTPS (derived from `OIDC_REDIRECT_URL`); logout switched from GET to CSRF-protected POST (SEC-25)
+- **ClusterRole least-privilege split** — `patch` granted on CronJobs only, `create` on Jobs only (previously both verbs on both resources) (SEC-26)
+- **`seccompProfile: RuntimeDefault`** — added to the Helm pod security context (INFRA-2)
 - **Remove global CORS `*`** — `Access-Control-Allow-Origin: *` middleware removed entirely; KubeCron has no public cross-origin API (SEC-5)
 - **Add CSRF double-submit cookie protection** — `EnsureCSRFCookie` sets a `csrf_token` cookie; `CSRFProtect` validates `X-CSRF-Token` header on every POST; HTMX auto-attaches via `htmx:configRequest` event (SEC-6)
 - **Rate limit `/auth/login` and `trigger`** — fixed-window rate limiter (10 req/min for login, 20 req/min for trigger) per source IP (SEC-11)
@@ -35,6 +41,7 @@ All notable changes to KubeCron are documented here.
 - **SQLite performance** — `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-65536` (64 MB), log batch flush 200 ms / 200 lines
 
 ### Added
+- **OIDC authorization** — `OIDC_ALLOWED_EMAILS` restricts which accounts may log in; `OIDC_OPERATOR_EMAILS` restricts suspend/resume/trigger to operators, everyone else is read-only (both optional, empty = no restriction)
 - **Cursor-based pagination on run history** — `RunsList` loads 50 runs per page; "Load more" button appends the next page via HTMX (`beforeend` on `#runs-tbody`) with OOB button update; `ListJobRunsPaged` / `ListJobRunsByDay` added to storage
 - **Heatmap "running" indicator** — days with at least one active run now show in blue (`#4299e1`) instead of red; tooltip shows running count; legend updated
 - **Heatmap click-to-filter** — clicking any heatmap tile navigates to `?day=YYYY-MM-DD`; a filter chip with a "✕ clear" link appears above the run table; `GET /clusters/.../runs/more` partial endpoint added for pagination
