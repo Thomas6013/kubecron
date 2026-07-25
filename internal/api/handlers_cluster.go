@@ -118,7 +118,7 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 	clusterID := r.PathValue("clusterID")
 	ctx := r.Context()
 
-	cronjobs, err := h.store.ListCronJobs(ctx, clusterID)
+	cronjobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
@@ -129,17 +129,11 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 		Rows      []cronJobRowData
 	}
 
-	runningRuns, _ := h.store.GetRunningRuns(ctx)
-	runningCount := make(map[string]int)
-	for _, rr := range runningRuns {
-		runningCount[rr.CronJobID]++
-	}
-
 	now := time.Now()
 	var groups []nsGroup
 	nsIdx := map[string]int{}
 	for _, cj := range cronjobs {
-		row := h.buildCronJobRow(ctx, clusterID, cj, runningCount, now)
+		row := buildCronJobRow(clusterID, cj, summaries[cj.ID], runningCount, now)
 		if _, ok := nsIdx[cj.Namespace]; !ok {
 			nsIdx[cj.Namespace] = len(groups)
 			groups = append(groups, nsGroup{Namespace: cj.Namespace})
@@ -185,16 +179,10 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("ns")
 	ctx := r.Context()
 
-	allCronJobs, err := h.store.ListCronJobs(ctx, clusterID)
+	allCronJobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
-	}
-
-	runningRuns, _ := h.store.GetRunningRuns(ctx)
-	runningCount := make(map[string]int)
-	for _, rr := range runningRuns {
-		runningCount[rr.CronJobID]++
 	}
 
 	now := time.Now()
@@ -203,7 +191,7 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 		if cj.Namespace != ns {
 			continue
 		}
-		rows = append(rows, h.buildCronJobRow(ctx, clusterID, cj, runningCount, now))
+		rows = append(rows, buildCronJobRow(clusterID, cj, summaries[cj.ID], runningCount, now))
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -283,16 +271,10 @@ func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allCronJobs, err := h.store.ListCronJobs(ctx, clusterID)
+	allCronJobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
-	}
-
-	runningRuns, _ := h.store.GetRunningRuns(ctx)
-	runningCount := make(map[string]int)
-	for _, rr := range runningRuns {
-		runningCount[rr.CronJobID]++
 	}
 
 	now := time.Now()
@@ -301,24 +283,22 @@ func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
 		if cj.Namespace != ns {
 			continue
 		}
-		fmt.Fprint(w, renderCronJobRow(h.buildCronJobRow(ctx, clusterID, cj, runningCount, now)))
+		fmt.Fprint(w, renderCronJobRow(buildCronJobRow(clusterID, cj, summaries[cj.ID], runningCount, now)))
 	}
 }
 
 // runningCountByCluster returns the number of currently-running runs per
-// cluster ID, using a single GetRunningRuns query. CronJob IDs have the form
+// cluster ID, using a single aggregate query. CronJob IDs have the form
 // "clusterID/namespace/name", so the cluster is the first path segment.
-// This replaces the previous per-cronjob ListJobRuns fan-out (N+1) on the
-// dashboard and cluster JSON list.
 func (h *Handler) runningCountByCluster(ctx context.Context) map[string]int {
 	out := map[string]int{}
-	runs, err := h.store.GetRunningRuns(ctx)
+	byCronJob, err := h.store.CountRunningRuns(ctx)
 	if err != nil {
 		return out
 	}
-	for _, r := range runs {
-		if i := strings.IndexByte(r.CronJobID, '/'); i > 0 {
-			out[r.CronJobID[:i]]++
+	for cronJobID, n := range byCronJob {
+		if i := strings.IndexByte(cronJobID, '/'); i > 0 {
+			out[cronJobID[:i]] += n
 		}
 	}
 	return out
@@ -331,18 +311,37 @@ func derefStr(s *string) string {
 	return *s
 }
 
-// buildCronJobRow assembles the display data for one CronJob table row.
-// Called by both ClusterDetail and NamespaceDetail to avoid duplicating
-// the missed/concurrent detection logic.
-func (h *Handler) buildCronJobRow(ctx context.Context, clusterID string, cj storage.CronJob, runningCount map[string]int, now time.Time) cronJobRowData {
+// sparklineRuns is how many recent run durations the row sparkline plots.
+const sparklineRuns = 20
+
+// buildCronJobRow assembles the display data for one CronJob table row from
+// data already in hand: sum may be nil when the CronJob has never run, and
+// runningCount is keyed by CronJob ID. It performs no I/O — the cluster-wide
+// reads happen once per render in cronJobRowInputs (PERF-2).
+//
+// Both the next-run countdown and missed detection resolve the schedule in the
+// CronJob's own time zone; evaluating them server-local is what made the
+// dashboard disagree with Kubernetes (DOM-1). When the zone cannot be resolved
+// the row shows no countdown and claims no missed run, rather than showing a
+// confidently wrong one.
+func buildCronJobRow(clusterID string, cj storage.CronJob, sum *storage.CronJobSummary, runningCount map[string]int, now time.Time) cronJobRowData {
 	row := cronJobRowData{ClusterID: clusterID, CronJob: cj}
-	row.NextRun, _ = schedule.NextRun(cj.Schedule, now)
-	row.LastRun, _ = h.store.GetLastJobRun(ctx, cj.ID)
-	row.Stats7d, _ = h.store.GetRunStats7d(ctx, cj.ID)
-	row.Durations, _ = h.store.GetRecentDurations(ctx, cj.ID, 20)
+	if sum != nil {
+		row.LastRun = sum.LastRun
+		row.Stats7d = sum.Stats7d
+		row.Durations = sum.Durations
+	}
 	row.IsConcurrent = runningCount[cj.ID] > 1
+
+	tz := cj.TZ()
+	if next, err := schedule.NextRun(cj.Schedule, tz, now); err == nil {
+		row.NextRun = next
+	} else {
+		row.ScheduleError = true
+	}
+
 	if !cj.Suspended {
-		if prev, err := schedule.PrevRun(cj.Schedule, now); err == nil {
+		if prev, err := schedule.PrevRun(cj.Schedule, tz, now); err == nil {
 			if now.Sub(prev) > 5*time.Minute {
 				if row.LastRun == nil || (row.LastRun.Status != "running" && row.LastRun.StartedAt.Before(prev)) {
 					row.IsMissed = true
@@ -351,4 +350,29 @@ func (h *Handler) buildCronJobRow(ctx context.Context, clusterID string, cj stor
 		}
 	}
 	return row
+}
+
+// cronJobRowInputs fetches everything the CronJob rows of one cluster need:
+// the CronJobs themselves plus, in a fixed number of queries, their summaries
+// and running-run counts. This replaces the previous three-queries-per-CronJob
+// fan-out, which the 10 s HTMX poll of every open tab re-ran in full (PERF-2).
+func (h *Handler) cronJobRowInputs(ctx context.Context, clusterID string) (
+	cronjobs []storage.CronJob,
+	summaries map[string]*storage.CronJobSummary,
+	runningCount map[string]int,
+	err error,
+) {
+	cronjobs, err = h.store.ListCronJobs(ctx, clusterID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	summaries, err = h.store.GetCronJobSummaries(ctx, clusterID, sparklineRuns)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	runningCount, err = h.store.CountRunningRuns(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return cronjobs, summaries, runningCount, nil
 }

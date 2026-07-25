@@ -7,6 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	// Embed the IANA time-zone database. The distroless runtime image ships no
+	// /usr/share/zoneinfo, so without this time.LoadLocation fails and every
+	// CronJob spec.timeZone would be unresolvable (DOM-1).
+	_ "time/tzdata"
 
 	"github.com/caarlos0/env/v11"
 
@@ -142,6 +146,12 @@ func main() {
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown error", "err", err)
+	}
+
+	// Close after the HTTP server has drained: SQLite checkpoints the WAL into
+	// the main file on the last connection close.
+	if err := store.Close(); err != nil {
+		slog.Error("database close error", "err", err)
 	}
 
 	slog.Info("kubecron stopped")

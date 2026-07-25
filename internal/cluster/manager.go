@@ -67,10 +67,17 @@ func (m *Manager) Load(ctx context.Context) error {
 		return m.loadInCluster(ctx)
 	}
 
+	// expected holds every cluster the config directory declares, including ones
+	// whose client fails to build. Only clusters whose kubeconfig is genuinely
+	// gone get soft-deleted — a malformed or transiently unreadable kubeconfig
+	// must not make its cluster disappear from the UI.
+	expected := make([]string, 0, len(files))
+
 	for _, entry := range files {
 		filename := entry.Name()
 		clusterID := strings.TrimSuffix(filename, filepath.Ext(filename))
 		kubeconfigPath := filepath.Join(m.kubeconfigDir, filename)
+		expected = append(expected, clusterID)
 
 		cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 		if err != nil {
@@ -82,7 +89,17 @@ func (m *Manager) Load(ctx context.Context) error {
 		}
 	}
 
+	m.markRemovedClusters(ctx, expected)
 	return nil
+}
+
+// markRemovedClusters soft-deletes stored clusters that the config directory no
+// longer declares, so removing a kubeconfig removes the cluster from the UI
+// instead of leaving a card that can never load (BUG-20).
+func (m *Manager) markRemovedClusters(ctx context.Context, expected []string) {
+	if err := m.store.MarkClustersDeletedExcept(ctx, expected); err != nil {
+		slog.Error("failed to mark removed clusters as deleted", "err", err)
+	}
 }
 
 // Registry returns the underlying registry populated by Load.
@@ -96,7 +113,11 @@ func (m *Manager) loadInCluster(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("in-cluster config unavailable: %w", err)
 	}
-	return m.registerCluster(ctx, "local", cfg)
+	if err := m.registerCluster(ctx, "local", cfg); err != nil {
+		return err
+	}
+	m.markRemovedClusters(ctx, []string{"local"})
+	return nil
 }
 
 // registerCluster builds a ClusterClient from a rest.Config and registers it.

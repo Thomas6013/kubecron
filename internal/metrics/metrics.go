@@ -47,6 +47,22 @@ var (
 	}, []string{"cluster", "namespace", "cronjob"})
 )
 
+// DeleteCronJobSeries drops every series carrying the given CronJob's labels.
+// Without this, deleting a CronJob leaves its gauges frozen at their last value
+// forever — a suspended/next-run/last-status reading for an object that no
+// longer exists, which alerting rules would keep evaluating (BUG-20).
+// DeletePartialMatch is used rather than DeleteLabelValues because the run
+// counter and duration histogram carry extra status/trigger labels.
+func DeleteCronJobSeries(clusterID, namespace, name string) {
+	labels := prometheus.Labels{"cluster": clusterID, "namespace": namespace, "cronjob": name}
+	JobRunsTotal.DeletePartialMatch(labels)
+	JobDurationSeconds.DeletePartialMatch(labels)
+	LastRunTimestamp.DeletePartialMatch(labels)
+	LastRunStatus.DeletePartialMatch(labels)
+	NextRunTimestamp.DeletePartialMatch(labels)
+	CronJobSuspended.DeletePartialMatch(labels)
+}
+
 // RecordCompletion updates all run-completion metrics.
 // cronJobID must have the form "clusterID/namespace/name".
 func RecordCompletion(clusterID, cronJobID, status, trigger string, startedAt time.Time, finishedAt time.Time) {

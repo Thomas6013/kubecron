@@ -3,7 +3,9 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/kubecron/kubecron/internal/cluster"
@@ -47,6 +49,7 @@ func (c *Controller) Start(ctx context.Context) error {
 
 	// ── CronJob informer ──────────────────────────────────────────────────────
 	cronJobInformer := factory.Batch().V1().CronJobs().Informer()
+	cronJobLister := factory.Batch().V1().CronJobs().Lister()
 	cronJobHandler := NewCronJobHandler(c.clusterID, c.store)
 	if _, err := cronJobInformer.AddEventHandler(cache.ResourceEventHandlerDetailedFuncs{
 		AddFunc:    cronJobHandler.OnAdd,
@@ -97,6 +100,21 @@ func (c *Controller) Start(ctx context.Context) error {
 		jobInformer.HasSynced,
 		podInformer.HasSynced,
 	}
+
+	// Once the CronJob cache holds the full cluster state, reconcile it against
+	// the store to catch CronJobs deleted while KubeCron was not running — the
+	// informer never reports those (BUG-20).
+	go func() {
+		if !cache.WaitForCacheSync(ctx.Done(), cronJobInformer.HasSynced) {
+			return // context cancelled during startup
+		}
+		live, err := cronJobLister.List(labels.Everything())
+		if err != nil {
+			slog.Error("cronjob reconcile: failed to list informer cache", "cluster", c.clusterID, "err", err)
+			return
+		}
+		cronJobHandler.Reconcile(ctx, live)
+	}()
 
 	return nil
 }

@@ -24,15 +24,18 @@ type resourcesResponse struct {
 
 // cronJobResponse is the enriched JSON shape for GET /api/clusters/{clusterID}/cronjobs.
 type cronJobResponse struct {
-	ID        string             `json:"id"`
-	Namespace string             `json:"namespace"`
-	Name      string             `json:"name"`
-	Schedule  string             `json:"schedule"`
-	Suspended bool               `json:"suspended"`
-	NextRunAt *time.Time         `json:"next_run_at,omitempty"`
-	Resources resourcesResponse  `json:"resources"`
-	LastRun   interface{}        `json:"last_run,omitempty"`
-	Stats7d   interface{}        `json:"stats_7d,omitempty"`
+	ID        string `json:"id"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Schedule  string `json:"schedule"`
+	// TimeZone is the CronJob's spec.timeZone, omitted when it declares none.
+	// next_run_at is computed in this zone.
+	TimeZone  string            `json:"time_zone,omitempty"`
+	Suspended bool              `json:"suspended"`
+	NextRunAt *time.Time        `json:"next_run_at,omitempty"`
+	Resources resourcesResponse `json:"resources"`
+	LastRun   interface{}       `json:"last_run,omitempty"`
+	Stats7d   interface{}       `json:"stats_7d,omitempty"`
 }
 
 // ListCronJobs handles GET /api/clusters/{clusterID}/cronjobs.
@@ -45,6 +48,13 @@ func (h *Handler) ListCronJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list cronjobs")
 		return
 	}
+	// One aggregate read for the whole cluster instead of two queries per
+	// CronJob (PERF-2).
+	summaries, err := h.store.GetCronJobSummaries(ctx, clusterID, sparklineRuns)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list cronjobs")
+		return
+	}
 
 	resp := make([]cronJobResponse, 0, len(cronjobs))
 	for _, cj := range cronjobs {
@@ -53,6 +63,7 @@ func (h *Handler) ListCronJobs(w http.ResponseWriter, r *http.Request) {
 			Namespace: cj.Namespace,
 			Name:      cj.Name,
 			Schedule:  cj.Schedule,
+			TimeZone:  cj.TZ(),
 			Suspended: cj.Suspended,
 			Resources: resourcesResponse{
 				CPURequest:    derefStr(cj.CPURequest),
@@ -62,21 +73,17 @@ func (h *Handler) ListCronJobs(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		// Compute next run time from the cron expression.
+		// Next run is resolved in the CronJob's own zone (DOM-1). It is omitted
+		// when the schedule or zone cannot be resolved.
 		if cj.Schedule != "" {
-			if next, err := schedule.NextRun(cj.Schedule, time.Now()); err == nil {
+			if next, err := schedule.NextRun(cj.Schedule, cj.TZ(), time.Now()); err == nil {
 				item.NextRunAt = &next
 			}
 		}
 
-		// Fetch the last job run for this CronJob.
-		if lastRun, err := h.store.GetLastJobRun(ctx, cj.ID); err == nil {
-			item.LastRun = lastRun
-		}
-
-		// Fetch 7-day stats for this CronJob.
-		if stats, err := h.store.GetRunStats7d(ctx, cj.ID); err == nil {
-			item.Stats7d = stats
+		if sum := summaries[cj.ID]; sum != nil {
+			item.LastRun = sum.LastRun
+			item.Stats7d = sum.Stats7d
 		}
 
 		resp = append(resp, item)

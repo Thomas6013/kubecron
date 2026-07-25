@@ -56,14 +56,14 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 | SEC-25 | 2026-07-08 | LOW | auth | CSRF cookie not `Secure`; logout via GET | FIXED 2026-07-09 — `EnsureCSRFCookie(secure)`, `POST /auth/logout` + HX-Redirect | no |
 | SEC-26 | 2026-07-08 | LOW | helm | ClusterRole broader than documented minimum | FIXED 2026-07-09 — split rules in `clusterrole.yaml` | helm lint |
 | SEC-27 | 2026-07-08 | INFO | ui | HTML-escaping used in JS string contexts | OPEN | no |
-| BUG-20 | 2026-07-08 | MED | watcher | Deleted CronJobs/clusters never cleaned (UI + Prometheus ghosts) | OPEN | no |
+| BUG-20 | 2026-07-08 | MED | watcher | Deleted CronJobs/clusters never cleaned (UI + Prometheus ghosts) | FIXED 2026-07-25 — `deleted_at` (migration 000005), `CronJobHandler.OnDelete` + tombstones + startup `Reconcile`, `MarkClustersDeletedExcept`, `metrics.DeleteCronJobSeries`, retention purge | `cronjob_test.go`, `summaries_test.go` |
 | BUG-21 | 2026-07-08 | LOW | storage | Mixed timestamp formats in SQL comparisons; cursor same-second skip | OPEN | no |
 | BUG-22 | 2026-07-08 | LOW | main | Server bind failure doesn't exit the process | OPEN | no |
 | BUG-23 | 2026-07-08 | LOW | sampler | `metrics_enabled` sticky-true; probe has no disable path | OPEN | no |
 | BUG-24 | 2026-07-08 | INFO | watcher | Backfilled failed runs get `exit_code=0` on pod-lookup failure | OPEN | no |
 | BUG-25 | 2026-07-08 | LOW | api | DownloadLogs: no existence check, whole log in RAM, raw filename | OPEN | no |
-| DOM-1 | 2026-07-08 | MED | schedule | CronJob `spec.timeZone` ignored → wrong next-run & false "missed" | OPEN | no |
-| PERF-2 | 2026-07-08 | LOW | api | N+1 (3 queries/CronJob) per page render × 10 s HTMX poll; PrevRun tick-scan | OPEN | no |
+| DOM-1 | 2026-07-08 | MED | schedule | CronJob `spec.timeZone` ignored → wrong next-run & false "missed" | FIXED 2026-07-25 — zone persisted (migration 000004), `schedule.{Parse,NextRun,PrevRun}` take an IANA zone, `time/tzdata` embedded, `unresolved` shown instead of a wrong countdown | `next_test.go` (incl. DST), `cronjob_row_test.go`, `cronjob_test.go` |
+| PERF-2 | 2026-07-08 | LOW | api | N+1 (3 queries/CronJob) per page render × 10 s HTMX poll; PrevRun tick-scan | FIXED 2026-07-25 — composite index `job_runs(cronjob_id, started_at DESC)` (migration 000006) removes all three temp-B-tree sorts; ~154→38 ms at 500 CJ × 500 runs. Reads gathered behind `GetCronJobSummaries`; batching via window functions measured 4–16× *slower* and rejected. PrevRun tick-scan unchanged | `summaries_test.go` parity + `BenchmarkGetCronJobSummaries` |
 | PERF-3 | 2026-07-08 | INFO | api/storage | SSE 1 Hz DB poll per viewer; `datetime(started_at)` defeats index | OPEN | no |
 | OBS-1 | 2026-07-08 | LOW | api | Auth middleware outermost → unauthenticated requests unlogged; no request ID | OPEN | no |
 | OBS-2 | 2026-07-08 | LOW | watcher | No informer-health signal — dead watch looks like "no runs" | OPEN | no |
@@ -195,8 +195,8 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [x] Upsert keys stable; targeted `ON CONFLICT DO UPDATE` (no data loss)
 - [x] Startup recovery for stale 'running' runs (`main.go:67-76`)
 - [ ] Consistent timestamp format/TZ across Go and SQL comparisons (BUG-21)
-- [ ] `spec.timeZone` respected in schedule math (DOM-1)
-- [ ] Deleted upstream objects reflected in DB/UI/metrics (BUG-20)
+- [x] `spec.timeZone` respected in schedule math (DOM-1)
+- [x] Deleted upstream objects reflected in DB/UI/metrics (BUG-20)
 - [ ] Fatal startup errors terminate the process (BUG-22)
 
 ### Maintainability / DRY / dead code
@@ -215,7 +215,7 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 ### Performance
 - [x] Dashboard running-count N+1 already fixed via single `GetRunningRuns` (`handlers_cluster.go:313`)
 - [x] Log writes batched (200 ms / 200 lines); log reads tail-limited (5 000)
-- [ ] Cluster-page per-row fan-out batched (PERF-2)
+- [x] Cluster-page per-row fan-out made index-served (PERF-2 — measured; batching was the wrong fix)
 - [ ] Pagination cursor index-friendly and gap-free (BUG-21)
 
 ### Observability
@@ -223,7 +223,7 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [x] `/readyz` gates on initial informer sync
 - [ ] Informer liveness signal after initial sync (OBS-2)
 - [ ] Unauthenticated/denied requests visible in access logs (OBS-1)
-- [ ] Stale metric series deleted with their objects (BUG-20)
+- [x] Stale metric series deleted with their objects (BUG-20)
 
 ### Testing
 - [x] `go test` + `-race` + golangci-lint + helm lint in CI
@@ -240,7 +240,7 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 ### Domain correctness (next-run / missed / stats are the product's output of record)
 - [x] Missed detection guards: suspension check, 5-min grace, running-run exemption (`handlers_cluster.go:344-352`)
 - [x] Duration never negative (`durationFromStart`, `scanJobRun`)
-- [ ] Timezone-aware schedule evaluation (DOM-1)
+- [x] Timezone-aware schedule evaluation (DOM-1)
 - [ ] Boundary-exact 7-day/daily windows (BUG-21)
 
 ## 5. Verdict
@@ -250,7 +250,7 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 **Highest-leverage next moves:**
 1. ~~**Quick security batch:** SEC-20, SEC-21, SEC-25, SEC-26, INFRA-2~~ — **done 2026-07-09** (plus nosniff/XFO/Referrer-Policy headers); tag 0.2.0 next.
 2. **Vendor the frontend assets** (SEC-22) — kills the CDN supply-chain exposure and makes air-gapped installs work; `embed.FS` is already wired.
-3. **DOM-1 + BUG-20 together** — timezone-aware scheduling and deleted-object cleanup are the two findings that make the dashboard *lie*; they share the `cronjobs` table (one migration adds `time_zone` + `deleted_at`).
+3. ~~**DOM-1 + BUG-20 together** — timezone-aware scheduling and deleted-object cleanup are the two findings that make the dashboard *lie*~~ — **done 2026-07-25** (v0.2.0), together with PERF-2; tag 0.2.0 next.
 4. **Decide INFRA-3** — either add QEMU+arm64 to the release build or strike the multi-arch claim from CLAUDE.md/ROADMAP; today the docs promise what CI doesn't do.
 
 **Audit-pass progress summary:**

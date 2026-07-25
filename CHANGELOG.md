@@ -6,7 +6,18 @@ All notable changes to KubeCron are documented here.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.2.0] - 2026-07-25
+
+The "stop being wrong" release: the three findings that made the dashboard
+disagree with the cluster, plus the read-path work needed to hold up at scale.
+See [`docs/PRODUCT.md`](docs/PRODUCT.md) for where the product goes from here.
+
 ### Security
+
 - **HTTP server timeouts** — `ReadHeaderTimeout` 10 s + `IdleTimeout` 120 s on the listener (Slowloris hardening); no `WriteTimeout` so SSE streams stay long-lived (SEC-20)
 - **Generic errors on suspend/resume** — raw Kubernetes errors are now logged server-side and never returned to HTTP clients; unknown cluster returns 404 instead of 500 (SEC-21)
 - **Security headers** — `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` on every response (SEC-23, partial — CSP/HSTS deferred)
@@ -23,6 +34,27 @@ All notable changes to KubeCron are documented here.
 - **Warn at boot when `OIDC_SESSION_KEY` is empty** — previously a random key was generated silently, invalidating all sessions on restart
 
 ### Fixed
+
+- **CronJob `spec.timeZone` is now honoured (DOM-1)** — next-run countdowns and
+  missed-run detection are evaluated in the CronJob's own zone instead of the
+  server's. A `spec.timeZone: America/New_York` job was previously shown with a
+  countdown up to five hours off and could be flagged `missed` while perfectly
+  healthy. `spec.timeZone` is persisted on `cronjobs` (migration 000004), the
+  `schedule` package takes an IANA zone on every entry point, and the binary
+  embeds `time/tzdata` because the distroless image ships no zoneinfo. When a
+  schedule or zone cannot be resolved the row now shows `unresolved` and claims
+  no missed run, rather than a confidently wrong countdown. DST transitions are
+  covered by tests.
+- **Deleted CronJobs and clusters no longer ghost forever (BUG-20)** — both are
+  soft-deleted (migration 000005): they disappear from listings and their
+  Prometheus series are dropped via `metrics.DeleteCronJobSeries`, while their
+  run history is preserved and stays reachable by direct link. Deletions are
+  caught three ways: the informer's `OnDelete` (including
+  `DeletedFinalStateUnknown` tombstones), a startup reconciliation against the
+  informer cache for CronJobs removed while KubeCron was down, and
+  `MarkClustersDeletedExcept` for kubeconfigs removed from `KUBECONFIG_DIR`. A
+  CronJob or cluster that reappears is revived. The retention job purges
+  soft-deleted CronJob rows once their runs have aged out.
 - **`findRunID` O(N×M) scan replaced with O(1) RunIndex** — `JobHandler` populates an in-memory `jobName → runID` map on every new Job; `PodHandler.findRunID` checks it first and falls back to DB only at startup (BUG-4)
 - **`Manager.Load` no longer errors on `.gitkeep` and dotfiles** — file loop now skips dot-prefixed names and non-`.yaml`/`.yml` extensions (BUG-5)
 - **Pod log/metric capture for Running pods at startup** — `PodHandler.OnAdd` now handles `PodRunning`; `retryOnAdd` goroutine works around the Job/Pod informer ordering race at boot
@@ -30,6 +62,30 @@ All notable changes to KubeCron are documented here.
 - **Log triplication on multi-node/restart** — `backfillRun` skips log streaming when `log_size_bytes > 0` already
 
 ### Changed
+
+- **Hot read path made index-friendly (PERF-2)** — migration 000006 adds
+  `idx_job_runs_cronjob_started ON job_runs(cronjob_id, started_at DESC)`. The
+  three reads behind every CronJob row (last run, 7-day stats, recent durations)
+  each matched on `cronjob_id` and ordered by `started_at`, so SQLite sorted that
+  CronJob's whole run history through a temp B-tree on every one — re-run every
+  10 s per open tab by the HTMX poll. All three are now ordered index scans and
+  the 7-day aggregate is index-covered. Measured on 500 CronJobs × 500 runs
+  (250k rows): a page render's worth of queries drops from ~154 ms to ~38 ms.
+  A batched window-function alternative was measured and rejected —
+  `ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)` cannot use an index for the
+  partition ordering and came out 4–16× slower (~600 ms on the same data).
+- **Row rendering no longer touches the store** — handlers gather their reads
+  once per render through `Store.GetCronJobSummaries`, and `buildCronJobRow` is
+  a pure function of what it is handed (making the DOM-1 regressions testable).
+- **`CountRunningRuns`** replaces `GetRunningRuns` on page renders: an aggregate
+  in SQLite instead of materialising every running row to count it.
+- **CronJob rows show the schedule's time zone** when `spec.timeZone` is set — a
+  schedule means nothing without the zone it is read in. `GET /api/clusters/{id}/cronjobs`
+  gained a `time_zone` field, and `next_run_at` is computed in that zone.
+- **`Store.Close()`** added and called on shutdown, so a clean exit checkpoints
+  the WAL instead of leaving `-wal`/`-shm` files for the next start to recover.
+- `GET /api/clusters/{id}/cronjobs` now omits `last_run`/`stats_7d` for a CronJob
+  with no runs, where it previously emitted `null`.
 - **Prometheus metrics now wired** — 6 collectors are fully populated: `kubecron_job_runs_total`, `kubecron_job_duration_seconds`, `kubecron_last_run_timestamp`, `kubecron_last_run_status`, `kubecron_cronjob_suspended`, `kubecron_next_run_timestamp`
 - **Removed `internal/ui/templates/`** — the `templ` package was unused; removed from `go.mod`, Dockerfile, and CI
 - **Simplified Dockerfile** — single-stage Go build (removed `templ-gen` stage)
@@ -41,6 +97,19 @@ All notable changes to KubeCron are documented here.
 - **SQLite performance** — `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-65536` (64 MB), log batch flush 200 ms / 200 lines
 
 ### Added
+
+- **`docs/PRODUCT.md`** — product strategy: why a viewer does not create
+  dependency, the three levers that would (alerting with log context, a
+  searchable archive of dead pods' logs, right-sizing/cost), a phased plan, and
+  explicit anti-goals.
+- **Test coverage** — `CronJobHandler` is now covered (timezone persistence,
+  soft delete, tombstones, revival, reconciliation), closing part of TEST-1;
+  plus schedule DST/zone cases, `GetCronJobSummaries` parity against the
+  per-CronJob queries it fronts, the soft-delete/purge paths, a
+  `BenchmarkGetCronJobSummaries` regression benchmark, and
+  `TestOpen_UpgradesExistingDatabase`, which applies only the 0.1.0 migrations
+  and then opens the database with current code — the upgrade path every
+  existing deployment takes, and one no previous test exercised.
 - **OIDC authorization** — `OIDC_ALLOWED_EMAILS` restricts which accounts may log in; `OIDC_OPERATOR_EMAILS` restricts suspend/resume/trigger to operators, everyone else is read-only (both optional, empty = no restriction)
 - **Cursor-based pagination on run history** — `RunsList` loads 50 runs per page; "Load more" button appends the next page via HTMX (`beforeend` on `#runs-tbody`) with OOB button update; `ListJobRunsPaged` / `ListJobRunsByDay` added to storage
 - **Heatmap "running" indicator** — days with at least one active run now show in blue (`#4299e1`) instead of red; tooltip shows running count; legend updated

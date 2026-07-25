@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,19 +13,26 @@ import (
 // Cluster
 // ---------------------------------------------------------------------------
 
+// UpsertCluster inserts or refreshes a cluster. A cluster that reappears after
+// having been soft-deleted is revived (deleted_at cleared).
 func (s *SQLiteStore) UpsertCluster(ctx context.Context, c Cluster) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO clusters(id, name, metrics_enabled, created_at)
 		VALUES (?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
+		ON CONFLICT(id) DO UPDATE SET
+			name       = excluded.name,
+			deleted_at = NULL`,
 		c.ID, c.Name, boolToInt(c.MetricsEnabled), c.CreatedAt,
 	)
 	return wrapErr("UpsertCluster", err)
 }
 
+// ListClusters returns every cluster still backed by a kubeconfig. Clusters
+// whose kubeconfig has been removed are soft-deleted and excluded (BUG-20).
 func (s *SQLiteStore) ListClusters(ctx context.Context) ([]Cluster, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, metrics_enabled, created_at FROM clusters ORDER BY name`)
+		SELECT id, name, metrics_enabled, created_at FROM clusters
+		WHERE deleted_at IS NULL ORDER BY name`)
 	if err != nil {
 		return nil, wrapErr("ListClusters", err)
 	}
@@ -43,6 +51,30 @@ func (s *SQLiteStore) ListClusters(ctx context.Context) ([]Cluster, error) {
 	return out, wrapErr("ListClusters rows", rows.Err())
 }
 
+// MarkClustersDeletedExcept soft-deletes every cluster whose ID is not in
+// keepIDs. Called after the kubeconfig directory is loaded so that removing a
+// kubeconfig removes the cluster from the UI. An empty keepIDs is treated as a
+// no-op: loading zero clusters means something went wrong with the config
+// directory, not that every cluster was decommissioned.
+func (s *SQLiteStore) MarkClustersDeletedExcept(ctx context.Context, keepIDs []string) error {
+	if len(keepIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(keepIDs)+1)
+	args = append(args, time.Now())
+	placeholders := make([]string, len(keepIDs))
+	for i, id := range keepIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE clusters SET deleted_at = ?
+		WHERE deleted_at IS NULL AND id NOT IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	return wrapErr("MarkClustersDeletedExcept", err)
+}
+
 func (s *SQLiteStore) SetClusterMetricsEnabled(ctx context.Context, clusterID string, enabled bool) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE clusters SET metrics_enabled = ? WHERE id = ?`,
@@ -55,35 +87,45 @@ func (s *SQLiteStore) SetClusterMetricsEnabled(ctx context.Context, clusterID st
 // CronJob
 // ---------------------------------------------------------------------------
 
+// cronJobCols is the canonical SELECT column list for cronjobs, shared by every
+// query that scans a full CronJob row.
+const cronJobCols = `id, cluster_id, namespace, name, schedule, time_zone, suspended,
+	       cpu_request, cpu_limit, memory_request, memory_limit,
+	       last_successful_time, updated_at, deleted_at`
+
+// UpsertCronJob inserts or refreshes a CronJob. A CronJob recreated under the
+// same name is revived (deleted_at cleared) rather than staying hidden.
 func (s *SQLiteStore) UpsertCronJob(ctx context.Context, cj CronJob) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cronjobs(
-			id, cluster_id, namespace, name, schedule, suspended,
+			id, cluster_id, namespace, name, schedule, time_zone, suspended,
 			cpu_request, cpu_limit, memory_request, memory_limit,
 			last_successful_time, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			schedule             = excluded.schedule,
+			time_zone            = excluded.time_zone,
 			suspended            = excluded.suspended,
 			cpu_request          = excluded.cpu_request,
 			cpu_limit            = excluded.cpu_limit,
 			memory_request       = excluded.memory_request,
 			memory_limit         = excluded.memory_limit,
 			last_successful_time = excluded.last_successful_time,
-			updated_at           = excluded.updated_at`,
-		cj.ID, cj.ClusterID, cj.Namespace, cj.Name, cj.Schedule, boolToInt(cj.Suspended),
+			updated_at           = excluded.updated_at,
+			deleted_at           = NULL`,
+		cj.ID, cj.ClusterID, cj.Namespace, cj.Name, cj.Schedule, cj.TimeZone, boolToInt(cj.Suspended),
 		cj.CPURequest, cj.CPULimit, cj.MemoryRequest, cj.MemoryLimit,
 		cj.LastSuccessfulTime, cj.UpdatedAt,
 	)
 	return wrapErr("UpsertCronJob", err)
 }
 
+// ListCronJobs returns the CronJobs still present in the cluster. Soft-deleted
+// ones are excluded so they stop appearing as ghost rows (BUG-20).
 func (s *SQLiteStore) ListCronJobs(ctx context.Context, clusterID string) ([]CronJob, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, cluster_id, namespace, name, schedule, suspended,
-		       cpu_request, cpu_limit, memory_request, memory_limit,
-		       last_successful_time, updated_at
-		FROM cronjobs WHERE cluster_id = ? ORDER BY namespace, name`,
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+cronJobCols+` FROM cronjobs
+		 WHERE cluster_id = ? AND deleted_at IS NULL ORDER BY namespace, name`,
 		clusterID,
 	)
 	if err != nil {
@@ -102,12 +144,14 @@ func (s *SQLiteStore) ListCronJobs(ctx context.Context, clusterID string) ([]Cro
 	return out, wrapErr("ListCronJobs rows", rows.Err())
 }
 
+// GetCronJobByName looks up a single CronJob. Unlike ListCronJobs it does not
+// filter out soft-deleted rows: an existing link to the run history of a
+// CronJob that has since been deleted keeps working. Callers that render a
+// live view should check DeletedAt.
 func (s *SQLiteStore) GetCronJobByName(ctx context.Context, clusterID, namespace, name string) (*CronJob, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, cluster_id, namespace, name, schedule, suspended,
-		       cpu_request, cpu_limit, memory_request, memory_limit,
-		       last_successful_time, updated_at
-		FROM cronjobs WHERE cluster_id = ? AND namespace = ? AND name = ?`,
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+cronJobCols+` FROM cronjobs
+		 WHERE cluster_id = ? AND namespace = ? AND name = ?`,
 		clusterID, namespace, name,
 	)
 	cj, err := scanCronJob(row)
@@ -115,6 +159,17 @@ func (s *SQLiteStore) GetCronJobByName(ctx context.Context, clusterID, namespace
 		return nil, nil
 	}
 	return cj, wrapErr("GetCronJobByName", err)
+}
+
+// MarkCronJobDeleted soft-deletes a CronJob that is no longer present in the
+// cluster. Idempotent: re-marking an already-deleted row keeps its original
+// deletion timestamp so the retention purge window does not slide.
+func (s *SQLiteStore) MarkCronJobDeleted(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE cronjobs SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		time.Now(), id,
+	)
+	return wrapErr("MarkCronJobDeleted", err)
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +329,105 @@ func (s *SQLiteStore) GetDailyRunStats(ctx context.Context, cronjobID string, da
 		out = append(out, d)
 	}
 	return out, wrapErr("GetDailyRunStats rows", rows.Err())
+}
+
+// ---------------------------------------------------------------------------
+// Cluster-wide aggregates (PERF-2)
+//
+// Cluster and namespace pages need last run + 7-day stats + recent durations
+// for every CronJob they display, and the HTMX poll re-renders all of it every
+// 10 s per open tab.
+//
+// The read below is still one indexed query per CronJob per question, because
+// that measured faster than every batched alternative: a single window-function
+// query (ROW_NUMBER() OVER (PARTITION BY cronjob_id ORDER BY started_at DESC))
+// cannot use an index for the partition ordering, so it sorts the cluster's
+// whole run history on every render — 600 ms vs 38 ms on 500 CronJobs × 500
+// runs. What actually made this cheap is migration 000006's composite index
+// (cronjob_id, started_at DESC), which turns each of these reads into an
+// ordered index scan instead of an index lookup plus a temp B-tree sort.
+//
+// Gathering them behind one call still matters: handlers no longer reach into
+// the store per row, and a future backend can batch differently without
+// touching the render path.
+// ---------------------------------------------------------------------------
+
+// GetCronJobSummaries returns the row-summary data for every CronJob in the
+// cluster that has at least one run, keyed by CronJob ID. CronJobs with no runs
+// are absent from the map; callers must treat a missing entry as "no data yet".
+func (s *SQLiteStore) GetCronJobSummaries(ctx context.Context, clusterID string, durationLimit int) (map[string]*CronJobSummary, error) {
+	ids, err := s.liveCronJobIDs(ctx, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]*CronJobSummary, len(ids))
+	for _, id := range ids {
+		lastRun, err := s.GetLastJobRun(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if lastRun == nil {
+			// No runs recorded yet — leave the CronJob out of the map entirely so
+			// callers render "no data" rather than zeroed statistics.
+			continue
+		}
+		stats, err := s.GetRunStats7d(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		durations, err := s.GetRecentDurations(ctx, id, durationLimit)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = &CronJobSummary{LastRun: lastRun, Stats7d: stats, Durations: durations}
+	}
+	return out, nil
+}
+
+// liveCronJobIDs returns the IDs of the cluster's non-deleted CronJobs.
+func (s *SQLiteStore) liveCronJobIDs(ctx context.Context, clusterID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM cronjobs WHERE cluster_id = ? AND deleted_at IS NULL ORDER BY namespace, name`,
+		clusterID,
+	)
+	if err != nil {
+		return nil, wrapErr("liveCronJobIDs", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, wrapErr("liveCronJobIDs scan", err)
+		}
+		out = append(out, id)
+	}
+	return out, wrapErr("liveCronJobIDs rows", rows.Err())
+}
+
+// CountRunningRuns returns the number of currently-running runs per CronJob ID.
+// Cheaper than GetRunningRuns when only the counts are needed: the aggregate
+// stays in SQLite instead of materialising every running row.
+func (s *SQLiteStore) CountRunningRuns(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT cronjob_id, COUNT(*) FROM job_runs WHERE status = 'running' GROUP BY cronjob_id`)
+	if err != nil {
+		return nil, wrapErr("CountRunningRuns", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, wrapErr("CountRunningRuns scan", err)
+		}
+		out[id] = n
+	}
+	return out, wrapErr("CountRunningRuns rows", rows.Err())
 }
 
 func (s *SQLiteStore) ListJobRunsPaged(ctx context.Context, cronjobID, beforeCursor string, limit int) ([]JobRun, error) {
@@ -557,8 +711,29 @@ func (s *SQLiteStore) DeleteOldLogLines(ctx context.Context, before time.Time) e
 	return wrapErr("DeleteOldLogLines", err)
 }
 
+// PurgeDeletedCronJobs hard-deletes soft-deleted CronJobs that were removed
+// before `before` and have no run rows left. The NOT EXISTS guard is what keeps
+// history safe: cronjobs → job_runs cascades, so a CronJob is only dropped once
+// DeleteOldData has already aged out all of its runs.
+func (s *SQLiteStore) PurgeDeletedCronJobs(ctx context.Context, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM cronjobs
+		WHERE deleted_at IS NOT NULL AND deleted_at < ?
+		  AND NOT EXISTS (SELECT 1 FROM job_runs WHERE cronjob_id = cronjobs.id)`,
+		before,
+	)
+	return wrapErr("PurgeDeletedCronJobs", err)
+}
+
 func (s *SQLiteStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
+}
+
+// Close closes the database handle. SQLite checkpoints the WAL into the main
+// database file on the last connection close, so a clean shutdown leaves no
+// -wal/-shm files behind for the next start to recover.
+func (s *SQLiteStore) Close() error {
+	return wrapErr("Close", s.db.Close())
 }
 
 // ---------------------------------------------------------------------------
@@ -573,11 +748,11 @@ type rowScanner interface {
 func scanCronJob(s rowScanner) (*CronJob, error) {
 	var cj CronJob
 	var suspended int
-	var lastSuccess sql.NullTime
+	var lastSuccess, deletedAt sql.NullTime
 	err := s.Scan(
-		&cj.ID, &cj.ClusterID, &cj.Namespace, &cj.Name, &cj.Schedule, &suspended,
+		&cj.ID, &cj.ClusterID, &cj.Namespace, &cj.Name, &cj.Schedule, &cj.TimeZone, &suspended,
 		&cj.CPURequest, &cj.CPULimit, &cj.MemoryRequest, &cj.MemoryLimit,
-		&lastSuccess, &cj.UpdatedAt,
+		&lastSuccess, &cj.UpdatedAt, &deletedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -585,6 +760,9 @@ func scanCronJob(s rowScanner) (*CronJob, error) {
 	cj.Suspended = suspended != 0
 	if lastSuccess.Valid {
 		cj.LastSuccessfulTime = &lastSuccess.Time
+	}
+	if deletedAt.Valid {
+		cj.DeletedAt = &deletedAt.Time
 	}
 	return &cj, nil
 }

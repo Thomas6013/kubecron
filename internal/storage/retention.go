@@ -47,4 +47,14 @@ func runRetention(ctx context.Context, store Store, retentionDays, logRetentionD
 		slog.DebugContext(ctx, "retention: deleted old data",
 			"before", before, "retention_days", retentionDays)
 	}
+
+	// Soft-deleted CronJobs are kept as long as they still have runs, so their
+	// history stays readable; once DeleteOldData has aged those runs out, the
+	// row itself can go.
+	if err := store.PurgeDeletedCronJobs(ctx, before); err != nil {
+		slog.ErrorContext(ctx, "retention: failed to purge deleted cronjobs",
+			"error", err, "before", before)
+	} else {
+		slog.DebugContext(ctx, "retention: purged deleted cronjobs", "before", before)
+	}
 }

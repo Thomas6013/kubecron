@@ -69,6 +69,10 @@ internal/
   ui/
     static/                   # Embedded CSS (app.css)
 
+docs/
+  AUDIT.md                    # Engineering audit, pass history and finding ids
+  PRODUCT.md                  # Product strategy: dependency levers, phase plan, anti-goals
+
 migrations/                   # SQL files embedded in binary via embed.FS
 charts/kubecron/              # Helm chart (cluster installs)
   Chart.yaml
@@ -128,13 +132,17 @@ See `.env.example`. Key variables:
 
 Tables: `clusters`, `cronjobs`, `job_runs`, `resource_samples`, `log_lines`.
 
-- `clusters` — one row per kubeconfig file; `metrics_enabled` flag set at startup and re-probed every 5 min
-- `cronjobs` — synced from informer; stores schedule, suspended state, resource requests/limits
+- `clusters` — one row per kubeconfig file; `metrics_enabled` flag set at startup and re-probed every 5 min; `deleted_at` set when the kubeconfig is removed
+- `cronjobs` — synced from informer; stores schedule, `time_zone` (from `spec.timeZone`), suspended state, resource requests/limits, `deleted_at`
 - `job_runs` — one row per CronJob execution; status: `running` → `succeeded`/`failed`; stores avg/max CPU+RAM
 - `resource_samples` — raw PodMetrics samples (15 s interval) linked to a `job_run`
 - `log_lines` — streamed pod log lines linked to a `job_run`
 
 Migrations are embedded SQL files in `migrations/` applied at startup via `embed.FS`.
+
+**Soft delete:** listings (`ListCronJobs`, `ListClusters`) filter on `deleted_at IS NULL`; `GetCronJobByName` deliberately does not, so existing links to the run history of a deleted CronJob keep working. Any new listing query must filter too.
+
+**Indexes:** the CronJob-row read path (`GetLastJobRun`, `GetRunStats7d`, `GetRecentDurations`) depends on `idx_job_runs_cronjob_started(cronjob_id, started_at DESC)` to avoid a temp-B-tree sort per query. Check `EXPLAIN QUERY PLAN` before changing those queries' `WHERE`/`ORDER BY`.
 
 ---
 
@@ -154,11 +162,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
-### Correctness & Domain — Medium Priority
-
-- **DOM-1** — CronJob `spec.timeZone` is ignored; next-run countdown and "missed" detection are computed in server TZ.
-- **BUG-20** — deleted CronJobs/clusters are never removed or marked in the DB: ghost rows in the UI, stale Prometheus series.
-
 ### Security — Medium Priority
 
 - **SEC-22** — htmx/Chart.js/fonts loaded from CDNs without SRI; breaks air-gapped installs. Fix: vendor into `internal/ui/static/`.
@@ -177,11 +180,16 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 ### Performance — Medium Priority
 
 - **PERF-1** — log lines stored in SQLite; `log_lines` can grow large before retention. Planned: S3 log storage backend.
-- **PERF-2** — cluster pages issue 3 queries per CronJob per render, re-run every 10 s per open tab (HTMX poll).
 
 ### Testing — Medium Priority
 
-- **TEST-1** — schedule, auth, storage, broadcaster, watcher (JobHandler), HTTP handlers covered; `go test -race` runs in CI (`ci.yml`). Still missing: CronJobHandler/PodHandler, sampler, Streamer, cluster.Manager; no coverage threshold.
+- **TEST-1** — schedule (incl. timezone/DST), auth, storage (incl. the migration upgrade path), broadcaster, watcher (Job + CronJob handlers), HTTP handlers covered; `go test -race` runs in CI (`ci.yml`). Still missing: PodHandler, sampler, Streamer, cluster.Manager; no coverage threshold.
+
+### Resolved (archived)
+
+- **DOM-1** — `spec.timeZone` now honoured end to end _(v0.2.0)_. `schedule.{Parse,NextRun,PrevRun}` take an IANA zone; `cmd/kubecron` imports `time/tzdata` because distroless ships no zoneinfo. An unresolvable schedule or zone renders `unresolved` rather than a wrong countdown.
+- **BUG-20** — deleted CronJobs/clusters are soft-deleted _(v0.2.0)_: hidden from listings, Prometheus series dropped, history preserved, revived on recreation. Caught by `OnDelete`, by a post-cache-sync `Reconcile` (for deletions that happened while KubeCron was down), and by `MarkClustersDeletedExcept` on kubeconfig load.
+- **PERF-2** — fixed by indexing, not batching _(v0.2.0)_. Migration 000006's `job_runs(cronjob_id, started_at DESC)` removes the temp-B-tree sort behind each row read. A window-function batch was measured at 4–16× slower and rejected; see the comment above `GetCronJobSummaries` before attempting it again.
 
 ---
 
@@ -190,6 +198,7 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 - **No CGO**: always build with `CGO_ENABLED=0`.
 - **UI rendering**: all HTML is generated in `internal/api/html.go`, `html_components.go`, `html_log.go`, and `html_chart.go` via `fmt.Fprintf`. No template engine. When adding a new UI component, add a helper to `html_components.go` (reusable row/card) or the appropriate thematic file rather than inlining HTML in handlers.
 - **SQL**: all queries in `internal/storage/queries.go`. New tables = new migration file in `migrations/`.
+- **Schedules**: never evaluate a cron expression without its zone. Every `schedule` entry point takes an IANA zone name; pass `cj.TZ()`. On error, show nothing rather than a wrong time — a wrong countdown is worse than an absent one.
 - **Error handling**: never return raw K8s API or DB errors to HTTP clients. Log with `slog.Error()`, return 500.
 - **Secrets**: never log kubeconfig paths or content, OIDC secrets, or session keys.
 - **Versioning**: update `CHANGELOG.md` and the `Version` constant in `internal/version/version.go` on every release.

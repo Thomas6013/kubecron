@@ -24,7 +24,7 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 - **History visuals** — duration sparkline per CronJob, 90-day calendar heatmap with click-to-filter, missed/concurrent run badges
 - **Resource usage** — CPU and memory sampled every 15 s when metrics-server is available; avg/max computed per run
 - **7-day statistics** — success rate, average and max duration per CronJob
-- **Next-run countdown** — computed from the cron expression, updated live in the browser
+- **Next-run countdown** — computed from the cron expression in the CronJob's own `spec.timeZone`, updated live in the browser; missed-run detection uses the same zone
 - **Suspend / Resume / Trigger** — control CronJobs directly from the UI without touching kubectl
 - **Multi-cluster** — one kubeconfig file per cluster in a directory; all clusters shown in a unified dashboard
 - **OIDC authentication** — optional SSO via Keycloak, Dex, Google, or any OIDC provider

@@ -1,0 +1,11 @@
+-- PERF-2: every CronJob row on a cluster/namespace page needs that CronJob's
+-- most recent run, its 7-day aggregate and its last 20 durations — all of them
+-- "job_runs for one cronjob_id, newest first". idx_job_runs_cronjob(cronjob_id)
+-- could find the rows but not order them, so SQLite sorted every matching run
+-- through a temp B-tree on each query, and the HTMX poll re-ran that every 10 s
+-- per open tab.
+--
+-- With started_at in the index the same reads are answered by an ordered index
+-- scan. Measured on 500 CronJobs × 500 runs (250k rows): a full page render's
+-- worth of queries drops from ~154 ms to ~38 ms.
+CREATE INDEX idx_job_runs_cronjob_started ON job_runs(cronjob_id, started_at DESC);

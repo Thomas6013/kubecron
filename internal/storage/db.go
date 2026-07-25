@@ -19,11 +19,17 @@ type Store interface {
 	UpsertCluster(ctx context.Context, c Cluster) error
 	ListClusters(ctx context.Context) ([]Cluster, error)
 	SetClusterMetricsEnabled(ctx context.Context, clusterID string, enabled bool) error
+	MarkClustersDeletedExcept(ctx context.Context, keepIDs []string) error
 
 	// CronJob operations
 	UpsertCronJob(ctx context.Context, cj CronJob) error
 	ListCronJobs(ctx context.Context, clusterID string) ([]CronJob, error)
 	GetCronJobByName(ctx context.Context, clusterID, namespace, name string) (*CronJob, error)
+	MarkCronJobDeleted(ctx context.Context, id string) error
+	// GetCronJobSummaries returns last run + 7-day stats + the last
+	// durationLimit durations for every CronJob in the cluster, in a fixed
+	// number of queries rather than three per CronJob (PERF-2).
+	GetCronJobSummaries(ctx context.Context, clusterID string, durationLimit int) (map[string]*CronJobSummary, error)
 
 	// JobRun operations
 	UpsertJobRun(ctx context.Context, r JobRun) error
@@ -38,6 +44,9 @@ type Store interface {
 	UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error
 	UpdateJobRunNode(ctx context.Context, id, nodeName, containerImage string) error
 	GetRunningRuns(ctx context.Context) ([]JobRun, error)
+	// CountRunningRuns returns running-run counts keyed by CronJob ID, for
+	// callers that need the counts but not the rows.
+	CountRunningRuns(ctx context.Context) (map[string]int, error)
 	MarkRunFailed(ctx context.Context, id string) error
 	AddLogSize(ctx context.Context, id string, bytes int64) error
 	FinalizeResourceUsage(ctx context.Context, runID string) error
@@ -56,7 +65,10 @@ type Store interface {
 	// Maintenance
 	DeleteOldData(ctx context.Context, before time.Time) error
 	DeleteOldLogLines(ctx context.Context, before time.Time) error
+	PurgeDeletedCronJobs(ctx context.Context, before time.Time) error
 	Ping(ctx context.Context) error
+	// Close releases the underlying database handle, checkpointing the WAL.
+	Close() error
 }
 
 // SQLiteStore is the SQLite-backed implementation of Store.

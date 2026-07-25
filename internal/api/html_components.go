@@ -12,14 +12,17 @@ import (
 // table row. Used by both ClusterDetail and NamespaceDetail to avoid
 // duplicating the rendering logic.
 type cronJobRowData struct {
-	ClusterID    string
-	CronJob      storage.CronJob
-	NextRun      time.Time
-	LastRun      *storage.JobRun
-	Stats7d      *storage.RunStats
-	Durations    []int64
-	IsMissed     bool
-	IsConcurrent bool
+	ClusterID string
+	CronJob   storage.CronJob
+	NextRun   time.Time
+	LastRun   *storage.JobRun
+	Stats7d   *storage.RunStats
+	Durations []int64
+	IsMissed  bool
+	// ScheduleError is set when the cron expression or its time zone could not
+	// be resolved, so the row shows no countdown instead of a wrong one.
+	ScheduleError bool
+	IsConcurrent  bool
 }
 
 // renderCronJobRow returns the HTML <tr>…</tr> for a CronJob in the table.
@@ -67,10 +70,26 @@ func renderCronJobRow(d cronJobRowData) string {
 		suspendedTag += ` <span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);">missed</span>`
 	}
 
+	// The zone the schedule is evaluated in is part of what the schedule means,
+	// so show it whenever the CronJob declares one (DOM-1).
+	scheduleCell := fmt.Sprintf(`<code style="font-size:0.8rem;color:var(--muted);">%s</code>`, esc(d.CronJob.Schedule))
+	if tz := d.CronJob.TZ(); tz != "" {
+		scheduleCell += fmt.Sprintf(
+			`<br><span style="font-family:var(--font-mono);font-size:0.7rem;color:var(--muted);opacity:0.75;" title="CronJob spec.timeZone">%s</span>`,
+			esc(tz))
+	}
+
+	// An unparseable expression or unknown zone means we cannot say when the job
+	// runs next. Say that, rather than counting down to a wrong instant.
+	nextRunCell := countdownSpan(d.NextRun)
+	if d.ScheduleError {
+		nextRunCell = `<span class="badge" style="border-color:rgba(252,129,129,0.4);color:var(--red);" title="Unparseable schedule or unknown time zone">unresolved</span>`
+	}
+
 	return fmt.Sprintf(`
 <tr style="cursor:pointer;" onclick="window.location='/clusters/%s/cronjobs/%s/%s/runs'">
   <td><span style="font-family:var(--font-mono);color:%s;">%s</span>%s</td>
-  <td><code style="font-size:0.8rem;color:var(--muted);">%s</code></td>
+  <td>%s</td>
   <td>%s</td>
   <td>%s</td>
   <td>%s</td>
@@ -79,8 +98,8 @@ func renderCronJobRow(d cronJobRowData) string {
 </tr>`,
 		esc(d.ClusterID), esc(d.CronJob.Namespace), esc(d.CronJob.Name),
 		nameColor, esc(d.CronJob.Name), suspendedTag,
-		esc(d.CronJob.Schedule),
-		countdownSpan(d.NextRun),
+		scheduleCell,
+		nextRunCell,
 		lastStatus, stats7d, resources,
 		actionButtons(d.ClusterID, d.CronJob.Namespace, d.CronJob.Name, d.CronJob.Suspended),
 	)
