@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -57,6 +58,7 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 
 	clusters, err := h.store.ListClusters(ctx)
 	if err != nil {
+		slog.Error("dashboard: failed to load clusters", "err", err)
 		http.Error(w, "failed to load clusters", http.StatusInternalServerError)
 		return
 	}
@@ -120,6 +122,7 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 
 	cronjobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
+		slog.Error("cluster detail: failed to load cronjobs", "cluster", clusterID, "err", err)
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
 	}
@@ -181,6 +184,8 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 
 	allCronJobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
+		slog.Error("namespace view: failed to load cronjobs",
+			"cluster", clusterID, "namespace", ns, "route", r.Pattern, "err", err)
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
 	}
@@ -273,6 +278,8 @@ func (h *Handler) NamespaceRows(w http.ResponseWriter, r *http.Request) {
 
 	allCronJobs, summaries, runningCount, err := h.cronJobRowInputs(ctx, clusterID)
 	if err != nil {
+		slog.Error("namespace view: failed to load cronjobs",
+			"cluster", clusterID, "namespace", ns, "route", r.Pattern, "err", err)
 		http.Error(w, "failed to load cronjobs", http.StatusInternalServerError)
 		return
 	}
