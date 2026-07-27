@@ -246,8 +246,12 @@ func (s *SQLiteStore) GetRunStats7d(ctx context.Context, cronjobID string) (*Run
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
-			SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END),
+			-- COALESCE: SUM() over zero rows is NULL (COUNT(*) is 0), and these
+			-- two land in non-nullable ints. A CronJob that has run before but
+			-- not within the window matches no rows here, so without COALESCE
+			-- the scan fails and takes the whole page render down with it.
+			COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END), 0),
 			CAST(AVG(duration_ms) AS INTEGER),
 			MAX(duration_ms),
 			CAST(AVG(avg_cpu_millicores) AS INTEGER),
