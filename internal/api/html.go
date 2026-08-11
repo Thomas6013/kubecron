@@ -84,9 +84,16 @@ func htmlHead(title string, n navState) string {
 			`<button hx-post="/auth/logout" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--muted);background:none;cursor:pointer;border:1px solid var(--border);padding:2px 10px;border-radius:4px;">logout</button>` +
 			`</div>`
 	}
-	overviewCls := "nav-link"
-	if n.ActiveCluster == "" {
-		overviewCls += " active"
+	// The Overview link only appears when there are several clusters to
+	// aggregate. On a single-cluster install "/" redirects to that cluster, so
+	// the link would lead straight back to the page the reader is already on.
+	overviewLink := ""
+	if len(n.Clusters) > 1 {
+		cls := "nav-link"
+		if n.ActiveCluster == "" {
+			cls += " active"
+		}
+		overviewLink = `<a class="` + cls + `" href="/">Overview</a>`
 	}
 	_ = title
 	return `<!DOCTYPE html>
@@ -105,7 +112,7 @@ func htmlHead(title string, n navState) string {
 <body>
 <nav>
   <a class="logo" href="/"><span style="font-family:var(--font-mono);">[KubeCron]</span></a>
-  <a class="` + overviewCls + `" href="/">Overview</a>
+  ` + overviewLink + `
   ` + clusterNav(n) + `
   ` + navRight + `
 </nav>

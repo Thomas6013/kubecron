@@ -67,6 +67,19 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	days := normalizeWindow(atoiDefault(r.URL.Query().Get("days"), 7))
+
+	// A single-cluster install has nothing to aggregate: the fleet summary and
+	// that cluster's own summary would be the same numbers on two pages. Send
+	// the reader straight to the cluster view, which additionally lists the
+	// CronJobs. The fleet overview only earns its place once there is more than
+	// one cluster to compare.
+	if len(clusters) == 1 {
+		http.Redirect(w, r, fmt.Sprintf("/clusters/%s?days=%d",
+			url.PathEscape(clusters[0].ID), days), http.StatusSeeOther)
+		return
+	}
+
 	runningByCluster := h.runningCountByCluster(ctx)
 
 	cards := make([]card, 0, len(clusters))
@@ -74,8 +87,6 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		cjs, _ := h.store.ListCronJobs(ctx, c.ID)
 		cards = append(cards, card{c, len(cjs), runningByCluster[c.ID]})
 	}
-
-	days := normalizeWindow(atoiDefault(r.URL.Query().Get("days"), 7))
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, htmlHead("Dashboard", h.nav(ctx, "")))
