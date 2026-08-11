@@ -1,6 +1,11 @@
 # KubeCron — Engineering Audit
 
-> Current audit pass: **2026-07-08**
+> Current audit pass: **2026-08-11**
+> Previous audit pass: **2026-07-08**
+> Framework: full-tree pass across security, correctness, maintainability, DRY, dead code, altitude, performance, testing, docs compliance, supply chain, domain correctness, observability, and Kubernetes-native shape — each weighted by relevance to this project.
+
+<!-- Historical header from the bootstrap pass, kept for provenance: -->
+> Bootstrap pass: **2026-07-08**
 > Previous audit pass: _none in this document_ — an earlier audit existed (finding IDs `SEC-1..11+`, `BUG-1..14+` are referenced in `CHANGELOG.md` and code comments) but its document was never committed. This file re-bootstraps the audit trail; prior IDs are treated as retired and **never reused** — new findings start at `SEC-20` / `BUG-20`, other families at 1.
 > Framework: full-tree pass across security, correctness, maintainability, DRY, dead code, altitude, performance, testing, docs compliance, supply chain, domain correctness, observability, and Kubernetes-native shape — each weighted by relevance to this project.
 
@@ -9,6 +14,7 @@
 | Pass date | Model | Score | HIGH open | New findings | Closures | Notes |
 |---|---|---|---|---|---|---|
 | 2026-07-08 | Claude Fable 5 | 7.5/10 | 0 | 26 (0 H / 6 M / 13 L / 7 I) | 6 prior-pass verified fixed | Baseline document; prior audit doc lost, carry-overs reconstructed from CHANGELOG/CLAUDE.md |
+| 2026-08-11 | Claude Opus 5 | 7.5/10 | **1** | 5 (1 H / 3 M / 1 L) | 3 (OBS-3 + INFRA-4 found-and-fixed in-pass; MAINT-2 in-pass) | First HIGH in this document's history (SEC-28, chart-level). `govulncheck` run for the first time. Overview/metrics feature reviewed as part of the pass. |
 
 ## Severity Classification Rubric
 
@@ -23,6 +29,22 @@
 **Heuristic when in doubt:** single unauthenticated request exploits it → CRITICAL; one authenticated tenant against another → HIGH; one actor degrades service for others without a bug → MEDIUM; needs collusion/insider/physical access → LOW/INFO.
 
 ## Overall Assessment
+
+### Pass 2026-08-11
+
+**Score: 7.5/10 (unchanged — but the composition moved).** Two of the previous pass's most damaging MEDIUMs are gone for good (DOM-1, BUG-20, both closed in v0.2.0 and re-verified here), the observability story improved materially this pass, and lint is finally deterministic. Against that, this pass opens the **first HIGH in this document's history** — not in the Go code, which remains sound, but in the Helm chart's exposure model. Net: same number, healthier core, one blocking item.
+
+**The HIGH (SEC-28).** `oidc.enabled` and `ingress.enabled` both default to `false`, so a default install is safe (ClusterIP, port-forward only). But enabling the Ingress is the documented way to actually use the UI, and nothing — not a chart `fail`, not `NOTES.txt`, not a startup log — objects when it is turned on with OIDC still off. The result is an internet-reachable endpoint where a single unauthenticated `POST` suspends or triggers CronJobs across **every connected cluster**. The authorization code is correct; the packaging simply never forces the operator to notice that they have turned it off. `NOTES.txt` even prints the public URL with no caveat.
+
+**Observability was the weakest dimension and is now the most improved.** OBS-3 (found and fixed in this pass) was the significant one: every gauge-valued series was written only by live watcher events, so after each restart `kubecron_last_run_status` and friends had *no series at all* until each CronJob next happened to fire — up to 24 h for a nightly backup, precisely when a restart makes alerting most valuable. Verified empirically: a fresh process exposed 2 of 6 metric families. A DB-derived state collector now makes those gauges a function of stored state rather than of process uptime, and the previously-unexported "missed run" verdict — the single best signal that a schedule silently stopped firing — is now a metric.
+
+**Supply chain got its first real look (SUP-1).** `govulncheck` had never been run against this repo. It reports 14 reachable stdlib advisories at the pinned-minimum toolchain (`go 1.26.0`). The *released* image is likely unaffected because `golang:1.26-alpine` floats to a patched 1.26.x — which makes INFRA-1 (pin base images by digest) a trap rather than a plain win: pinning a digest with no CVE gate in CI would freeze a vulnerable stdlib into every future release. These two findings must be resolved together, gate first.
+
+**Dimensions n/a for this project** (unchanged): multi-tenant isolation (single-tenant ops tool by design); public-production/GDPR (no end-user PII beyond operator emails); microservice decomposition (the monolith is correct and justified in-chart).
+
+**Biggest forward risk:** shifted from doc drift to **packaging-vs-code drift**. The Go code enforces a careful operator/viewer split that the chart lets you switch off wholesale without a word. Doc drift, last pass's top risk, is materially better — CLAUDE.md now matches the code on timezone handling, soft deletes and indexing.
+
+### Pass 2026-07-08 (bootstrap)
 
 **Score: 7.5/10 (baseline for this document).** KubeCron is a well-shaped single-binary Go service: clean package boundaries (`api`/`auth`/`watcher`/`streamer`/`sampler`/`storage`), a justified monolith (one scaling axis, one SQLite writer), disciplined SQL in one file, migrations embedded and transactional, and a previous audit round that demonstrably landed (CSRF, rate limiting, open-redirect fix, XSS fix in SSE replay, upsert data-loss fix — all verified in code this pass). Zero CRITICAL/HIGH findings.
 
@@ -76,6 +98,13 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 | DOC-3 | 2026-07-08 | LOW | docs | CLAUDE.md: "Tailwind CDN" (none used), "single-stage Dockerfile" (two stages) | FIXED 2026-07-08 — CLAUDE.md corrected this pass | n/a |
 | DOC-4 | 2026-07-08 | LOW | docs | CLAUDE.md claimed `go test -race` missing — present in `ci.yml` | FIXED 2026-07-08 — CLAUDE.md corrected this pass | n/a |
 | DOC-5 | 2026-07-08 | LOW | docs | `docker-compose.yaml` comments in French (house rule: English); README says `:8080`, compose exposes `:8082` | OPEN | n/a |
+| SEC-28 | 2026-08-11 | **HIGH** | helm | `ingress.enabled=true` + `oidc.enabled=false` exposes unauthenticated suspend/resume/trigger across every cluster; no chart guard, no NOTES warning, no startup log | **OPEN** | no |
+| SUP-1 | 2026-08-11 | MED | ci | No CVE gate (`govulncheck`/image scan) in CI; 14 reachable stdlib advisories at pinned-minimum toolchain. Must be fixed **before** INFRA-1 digest-pinning | OPEN | no |
+| SEC-29 | 2026-08-11 | LOW | api | `/metrics` is auth-exempt (`auth.go:172`) and now exposes full cluster/namespace/CronJob inventory, schedules, run outcomes and resource usage | OPEN | no |
+| OBS-3 | 2026-08-11 | MED | metrics | Gauge series written only by live watcher events → absent after every restart until each CronJob next fires (verified: 2 of 6 families on a fresh process) | FIXED 2026-08-11 — `metrics.StateCollector` derives them from stored state every 30 s; counters/histogram stay event-driven | `fleet_test.go`, `missed_test.go` (rule shared with UI) |
+| OBS-4 | 2026-08-11 | MED | metrics | No series for in-flight runs, missed schedules, last-run duration/resources, per-cluster inventory, Metrics-API health, build info, or HTTP traffic | FIXED 2026-08-11 — 8 new families in `metrics.go`; HTTP labelled by route pattern, not path, to bound cardinality | `nav_test.go` (helpers), manual scrape verified |
+| INFRA-4 | 2026-07-08 | LOW | ci | golangci-lint `@latest` unpinned; no `.golangci.yml` | FIXED 2026-08-11 — root cause was the **v1 module path**: `@latest` there can never resolve v2, so CI silently froze on the last v1 while local v2 reported 15 findings CI never saw. `.golangci.yml` (v2, explicit exclusion presets) + CI installs `/v2/` | lint gate now 0 issues |
+| MAINT-2 | 2026-08-11 | INFO | api | Missed-run rule duplicated between the UI row builder and any future consumer | FIXED 2026-08-11 — extracted to `schedule.IsMissed`, now shared by the UI badge and `kubecron_cronjob_missed` | `missed_test.go` |
 
 ## 1.B Audit Coverage Matrix
 
@@ -99,11 +128,99 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 | Docs: `README.md`, `CLAUDE.md`, `ROADMAP.md`, `CHANGELOG.md`, `.env.example` | reviewed 2026-07-08 (harmonised same day, pre-audit) |
 | `internal/ui/static/app.css`, favicons | skipped — cosmetic CSS, no logic |
 | `*_test.go` (6 files, 1396 lines) | skimmed for coverage mapping only, not line-reviewed |
-| Helm templates: `ingress.yaml`, `pvc.yaml`, `service*.yaml`, `secret-oidc.yaml`, `_helpers.tpl`, `NOTES.txt` | skipped — listed, not read; low risk |
+| Helm templates: `ingress.yaml`, `pvc.yaml`, `service*.yaml`, `secret-oidc.yaml`, `_helpers.tpl`, `NOTES.txt` | reviewed 2026-08-11 — **closed last pass's gap; this is where SEC-28 was found** |
+| `internal/metrics/collector.go` (new) | reviewed 2026-08-11 |
+| `internal/api/html_overview.go` (new), `handlers_cluster.go` overview path | reviewed 2026-08-11 |
+| `internal/schedule/next.go` — `IsMissed` extraction | reviewed 2026-08-11 |
+| `.golangci.yml` (new) | reviewed 2026-08-11 |
+| Supply chain — `govulncheck ./...` | reviewed 2026-08-11 — first run; see SUP-1 |
+| `internal/ui/static/app.css`, favicons | skipped — presentation only, no logic (re-confirmed 2026-08-11) |
+| `*_test.go` (10 files) | skimmed for coverage mapping 2026-08-11; still not line-reviewed for assertion quality |
 
-**Coverage gaps the next pass must close:** line-review the remaining Helm templates (ingress TLS/annotations, secret-oidc) and the test files themselves (assert quality, not just existence); run `govulncheck`/image CVE scan if tooling is available read-only.
+**Coverage gaps the next pass must close:** line-review the test files for assertion quality (not just existence) — carried from the previous pass and still open; run an **image** CVE scan (Trivy/Grype) against the published image, which `govulncheck` does not cover; line-review `internal/ui/static/app.css` once it stops being purely presentational.
 
-## 2. New findings (2026-07-08) — detail
+## 2. New findings (2026-08-11) — detail
+
+### Highlights since the last pass
+
+`v0.2.0` closed the two findings that made the dashboard *lie* — DOM-1 (timezone-aware schedules) and BUG-20 (soft-deleted CronJobs/clusters) — plus PERF-2 by indexing. All three re-verified at their cited locations this pass. This pass adds the fleet/cluster summary views, eight metric families, and the state collector; and closes INFRA-4 after diagnosing why it had never actually bitten.
+
+### HIGH
+
+**SEC-28 — Ingress without OIDC is an unauthenticated control plane, and nothing says so.**
+`charts/kubecron/values.yaml:23` (`oidc.enabled: false`) and `:71` (`ingress.enabled: false`) are both safe defaults in isolation: with no Ingress, the Service is ClusterIP and `NOTES.txt` tells the operator to `port-forward`. The failure is the *combination*, which is also the documented path to actually using the product — README lists `ingress.enabled` as the way to "Expose via Ingress" (`README.md:80`) with no mention of authentication.
+
+When `authenticator` is nil, `server.go:81` makes the operator gate a pass-through by design:
+
+```go
+operator := func(next http.Handler) http.Handler { return next }
+if s.authenticator != nil {
+    operator = s.authenticator.RequireOperator
+}
+```
+
+so `POST /api/clusters/{id}/cronjobs/{ns}/{name}/suspend|resume|trigger` are reachable by anyone who can reach the Ingress. A single unauthenticated request can suspend a backup CronJob — or trigger one repeatedly — **on every cluster whose kubeconfig is mounted**. `auth.Middleware` is never installed at all in this mode, so there is no redirect-to-login either. Grep-verified: no `slog.Warn` anywhere fires when OIDC is disabled, and `NOTES.txt` prints `https://{{ .Values.ingress.host }}` unconditionally.
+
+Aggravating: `ingress.tls` defaults to `[]`, so the template emits no `tls:` block — the default Ingress is plaintext HTTP.
+
+Fix (all three, they are independent defences):
+1. Guard the chart — refuse the combination unless explicitly acknowledged:
+   ```yaml
+   {{- if and .Values.ingress.enabled (not .Values.oidc.enabled) (not .Values.ingress.acknowledgeInsecure) }}
+   {{- fail "ingress.enabled=true with oidc.enabled=false exposes unauthenticated suspend/resume/trigger on every connected cluster. Set oidc.enabled=true, or ingress.acknowledgeInsecure=true if the Ingress is on a trusted network." }}
+   {{- end }}
+   ```
+2. Log it at startup in `cmd/kubecron/main.go`, once, at `Warn`: OIDC disabled → all endpoints including mutating ones are unauthenticated.
+3. Say it in `NOTES.txt` and in the README's ingress row.
+
+### MEDIUM
+
+**SUP-1 — No vulnerability gate anywhere in CI, and INFRA-1 would make that worse.**
+`.github/workflows/` contains no `govulncheck`, Trivy, Grype or Snyk step (grep-verified). Run manually this pass, `govulncheck ./...` reports **14 stdlib advisories with reachable call paths**, against the `go 1.26.0` floor — including `GO-2026-4918` (infinite loop in the HTTP/2 transport on a malformed `SETTINGS_MAX_FRAME_SIZE`, fixed in 1.26.3) and several `crypto/x509` DoS paths, all reached through `api.Server.Start`.
+
+The released image is *probably* fine: `Dockerfile:2` uses `golang:1.26-alpine`, a floating tag that resolves to a patched 1.26.x at build time. That is luck, not policy — and it means **INFRA-1 (pin base images by digest) is a trap if done first**: pinning a digest without a CVE gate freezes whatever stdlib that digest carries into every subsequent release, converting today's accidental safety into a permanent exposure. Sequence the fixes: add the gate, then pin, then let Renovate move the digest.
+
+Fix: add a `govulncheck ./...` step to `ci.yml` (fails the build on reachable advisories) and an image scan to `docker-publish.yml`; only then pin digests.
+
+**OBS-3 — Gauge metrics did not survive a restart.** *(found and fixed this pass)*
+Before this pass every gauge was written exclusively from live events — `RecordCompletion` on pod completion (`pod.go:170`) and the CronJob informer (`cronjob.go:152,164`). Nothing repopulated them from the database. Verified empirically against a live cluster: a freshly started process exposed only `kubecron_cronjob_suspended` and `kubecron_next_run_timestamp` (the two the informer refires at cache sync). `kubecron_last_run_status`, `kubecron_last_run_timestamp`, `kubecron_job_runs_total` and `kubecron_job_duration_seconds` had **no series at all**.
+
+The consequence is worst exactly when it matters: an alert like `kubecron_last_run_status == 1` silently stops evaluating after a restart, and `absent()` rules either fire spuriously or mask a genuine failure, for as long as it takes each CronJob to next fire — up to a day for a nightly backup.
+
+Fixed by `internal/metrics/collector.go`: a 30 s ticker derives every gauge from stored state, making them a function of the database rather than of process uptime. Counters and the histogram deliberately stay event-driven (rebuilding them each pass would double-count). A run still in flight keeps its previous values rather than being overwritten with zeroes, and a CronJob that has never run publishes no `last_run_status` at all rather than a `0` that would claim a success that never happened.
+
+**OBS-4 — The metric set had real gaps.** *(found and fixed this pass)*
+Six families existed; none covered in-flight runs (so a hung or overlapping run was unalertable), missed schedules (the single best "my backup stopped firing" signal — computed for the UI badge since the first pass but never exported), last-run duration as a gauge (only a histogram, which alert rules cannot express against), last-run CPU/memory (the product samples resources and exported none of it), per-cluster inventory or Metrics-API health (so a resource gauge going flat was indistinguishable from a dead metrics-server), build info, or any HTTP traffic signal.
+
+Added in `internal/metrics/metrics.go`: `runs_active`, `cronjob_missed`, `last_run_duration_seconds`, `last_run_cpu_millicores`, `last_run_memory_bytes`, `cluster_cronjobs`, `cluster_metrics_api_available`, `build_info`, `http_requests_total`, `http_request_duration_seconds`. The HTTP pair is labelled by **`r.Pattern`, the matched ServeMux route**, never `r.URL.Path` — paths embed cluster/namespace/CronJob/run identifiers and would mint a series per object; unrouted requests collapse to a single `unmatched` label since that path is attacker-controlled.
+
+### LOW
+
+**SEC-29 — `/metrics` is unauthenticated and now says considerably more.**
+`auth.go:172` exempts `/metrics` from the session check alongside `/healthz` and `/readyz`. That is conventional — Prometheus needs to scrape it — but the endpoint now discloses, to anyone who can reach the pod: every cluster name, every namespace, every CronJob name, each one's next scheduled fire time, its last outcome, its duration, and its peak CPU/memory. That is a fairly complete map of an organisation's batch infrastructure and its backup windows.
+
+Not raised higher because it exposes no credentials and the service is ClusterIP by default — but note it compounds SEC-28: with an Ingress and no OIDC, `/metrics` is public too.
+
+Fix: document that `/metrics` must be reached via a NetworkPolicy-scoped scrape rather than the public Ingress; optionally support a bearer token for the scrape endpoint, or a separate listener port that the Ingress does not route.
+
+### Carry-overs re-verified this pass
+
+- **DOM-1** — FIXED, confirmed: `schedule.Parse/NextRun/PrevRun` all take an IANA zone; `time/tzdata` embedded at `main.go:13` with the distroless rationale written down.
+- **BUG-20** — FIXED, confirmed: `deleted_at` filters in `ListCronJobs`/`ListClusters`, `metrics.DeleteCronJobSeries` on delete. Extended this pass — the new fleet aggregates join `cronjobs` so a deleted CronJob's surviving run rows stay out of the totals (`fleet_test.go:TestGetFleetStats_ExcludesDeletedCronJobs`).
+- **PERF-2** — FIXED, confirmed; the comment above `GetCronJobSummaries` still warns off the window-function rewrite with its measurement.
+- **SEC-22** (CDN, no SRI) — **still OPEN**, unchanged: `html.go:110` unpkg htmx, `handlers_runs.go:317` jsdelivr Chart.js, neither with `integrity=`.
+- **INFRA-3** (amd64-only) — **still OPEN**, unchanged: `platforms: linux/amd64` at `docker-publish.yml:56,71`, still no QEMU step.
+- **INFRA-5** (CI skipped for Renovate) — **still OPEN**: `ci.yml:12` `if: github.actor != 'renovate[bot]'`. Now materially riskier — Renovate has produced nine branches and this pass consolidated eight dependency bumps that, merged as Renovate PRs, would have run zero tests.
+- **MAINT-1** (`htmlHead` discards `title`) — **still OPEN**: `html.go:98` `_ = title`.
+- **SEC-24, BUG-21/22/23/24/25, PERF-1/3, OBS-1/2, DOC-5, TEST-1** — carried unchanged; not re-investigated in depth this pass.
+
+### Positive notes
+
+- The `deleted_at` discipline held under extension: the new fleet queries were written against it correctly and have a regression test, rather than quietly re-introducing ghost rows into the new totals.
+- `GetTopCronJobs` interpolates its ordering expression from a **closed map** keyed by an unexported-value type (`storage.RankMetric`), with the `clusterID` filter left as a bound parameter — the one place in the codebase where SQL text is assembled, and it is fenced. Covered by `TestGetTopCronJobs_RejectsUnknownMetric`.
+- Single-cluster installs now redirect `/` to the cluster view instead of rendering a second, identical dashboard — the kind of duplication that usually calcifies into two divergent code paths.
+
+## 2.B Findings from the bootstrap pass (2026-07-08) — detail
 
 ### MEDIUM
 
@@ -188,6 +305,10 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [x] Raw upstream errors never reach clients (SEC-21 — fixed 2026-07-09)
 - [ ] Rate limiter proxy-aware and bounded (SEC-24)
 - [x] RBAC minimal per verb/resource pair (SEC-26 — fixed 2026-07-09)
+- [ ] **Packaging cannot silently ship an unauthenticated deployment** — chart refuses or loudly warns on `ingress.enabled && !oidc.enabled` (SEC-28) *(added 2026-08-11)*
+- [ ] Default Ingress requires TLS, or says why not (SEC-28 aggravator)
+- [ ] `/metrics` exposure scoped — not routed by the public Ingress (SEC-29) *(added 2026-08-11)*
+- [x] Any SQL text assembled in Go comes from a closed allow-list, never a caller string (`rankValueExpr`, `queries.go`) *(added 2026-08-11)*
 
 ### Correctness & concurrency
 - [x] Check-then-act sites locked (`Streamer.Stream`, `Sampler.Start`, broadcaster)
@@ -219,11 +340,15 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [ ] Pagination cursor index-friendly and gap-free (BUG-21)
 
 ### Observability
-- [x] Structured slog everywhere; 6 Prometheus collectors wired
+- [x] Structured slog everywhere; 14 Prometheus collectors wired *(6 → 14, 2026-08-11)*
 - [x] `/readyz` gates on initial informer sync
 - [ ] Informer liveness signal after initial sync (OBS-2)
 - [ ] Unauthenticated/denied requests visible in access logs (OBS-1)
 - [x] Stale metric series deleted with their objects (BUG-20)
+- [x] **Gauge series survive a process restart** — derived from stored state, not only from live events (OBS-3) *(added 2026-08-11)*
+- [x] Background-job failure is alertable without the UI: in-flight, missed-schedule, last-outcome and resource series all exported (OBS-4) *(added 2026-08-11)*
+- [x] HTTP metrics labelled by route pattern, never raw path — no per-object cardinality *(added 2026-08-11)*
+- [x] A metric is never published as a plausible-looking default: a never-run CronJob emits no `last_run_status` rather than `0` *(added 2026-08-11)*
 
 ### Testing
 - [x] `go test` + `-race` + golangci-lint + helm lint in CI
@@ -231,6 +356,14 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [ ] CronJobHandler/PodHandler/sampler/Streamer/Manager coverage (TEST-1)
 - [ ] Coverage measured with a threshold in CI
 - [ ] Renovate PRs run CI (INFRA-5)
+- [x] Lint behaviour is deterministic and identical locally and in CI (INFRA-4) *(added 2026-08-11)*
+- [ ] Test files reviewed for assertion quality, not just existence — carried gap
+
+### Supply chain
+- [ ] `govulncheck` gates merges (SUP-1) *(added 2026-08-11)*
+- [ ] Published image CVE-scanned (Trivy/Grype) *(added 2026-08-11)*
+- [ ] Base images digest-pinned — **only after** the CVE gate exists, or the pin freezes a vulnerable stdlib (INFRA-1 × SUP-1) *(added 2026-08-11)*
+- [x] SBOM generated and release images cosign-signed
 
 ### Docs
 - [x] README/env/CLAUDE.md/ROADMAP harmonised 2026-07-08 (pre-audit pass)
@@ -244,6 +377,27 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [ ] Boundary-exact 7-day/daily windows (BUG-21)
 
 ## 5. Verdict
+
+### Pass 2026-08-11
+
+**Ship-readiness: yes for `helm install` defaults, no for an Ingress deployment until SEC-28 is addressed.** The Go code is in its best shape yet — the two findings that made the dashboard lie are closed, observability went from the weakest dimension to a genuine strength, and the lint gate is deterministic for the first time. The blocker is packaging, not code: the chart will happily publish an unauthenticated control plane for every connected cluster and never mention it.
+
+**Remaining blockers:** SEC-28 (HIGH). Nothing else blocks.
+
+**Highest-leverage next moves:**
+1. **SEC-28 — three small edits, one HIGH closed.** A `fail` guard in the chart, a `slog.Warn` at startup when OIDC is off, and a sentence each in `NOTES.txt` and the README ingress row. None of it is more than an hour, and it is the only thing standing between this repo and a clean HIGH column.
+2. **SUP-1 before INFRA-1.** Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` *first*; pinning base-image digests before the gate exists would convert today's accidental patching into a permanent freeze. Doing these in the wrong order is worse than doing neither.
+3. **INFRA-5 — drop the `renovate[bot]` CI skip.** Nine Renovate branches are already open; this pass merged eight bumps by hand precisely because their PRs would have been untested. The condition inverts the point of a dependency bot.
+4. **SEC-22 — vendor htmx and Chart.js.** Unchanged from the last two passes' recommendation, and now the oldest open MEDIUM. `embed.FS` is already wired; this is mostly a download and two `<script>` edits, and it closes the CDN supply-chain path while making air-gapped installs work.
+
+**Audit-pass progress summary:**
+
+| Pass | Score | OPEN HIGH | OPEN MED | Closures that pass |
+|---|---|---|---|---|
+| 2026-07-08 | 7.5/10 | 0 | 8 | 6 verified from prior lost pass + 3 DOC fixed in-pass |
+| 2026-08-11 | 7.5/10 | **1** (SEC-28) | 5 (SEC-22, INFRA-3, PERF-1, TEST-1 partial, SUP-1) | DOM-1, BUG-20, PERF-2 verified closed in v0.2.0; OBS-3, OBS-4, INFRA-4, MAINT-2 found-and-fixed in-pass |
+
+### Pass 2026-07-08 (bootstrap)
 
 **Ship-readiness: yes for its stated positioning** ("alpha, personal project" per README) — no HIGH/CRITICAL, sound architecture, real test momentum. For a 0.2.0 tag the six MEDIUMs are not blockers, but SEC-20/SEC-21 are each ~10-line fixes that should ride in the release.
 

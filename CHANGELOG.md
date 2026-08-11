@@ -10,6 +10,85 @@ _Nothing yet._
 
 ---
 
+## [0.3.0] - 2026-08-11
+
+The "know where to look" release: a summary that ranks what actually needs
+attention, and metrics that keep telling you so after a restart.
+
+### Added
+
+- **Fleet and cluster summary views** — every view now leads with the numbers
+  that decide where to look: CronJobs, success rate, failures (and how many
+  distinct CronJobs they came from), runs in flight, and suspended jobs. Below
+  them, four rankings — most failures, longest mean duration, highest peak CPU,
+  highest peak memory — each linking straight to the CronJob's run history, with
+  bars scaled against the leader so the list reads as a distribution. A
+  24 h / 7 d / 30 d switch rescopes the whole block.
+- **Cluster-scoped summary** — the same block heads the cluster view, restricted
+  to that cluster, so "where do I focus" is answerable per cluster as well as
+  fleet-wide. Both views share one code path and one pair of queries.
+- **Cluster control in the nav** — a picker when there are several clusters, a
+  plain label naming the cluster when there is exactly one, nothing when there
+  are none. A single-option dropdown is a control that cannot do anything.
+- **Eight new Prometheus metrics** — `kubecron_runs_active` (hung or overlapping
+  runs), `kubecron_cronjob_missed` (a schedule that silently stopped firing —
+  computed for the UI badge since the beginning but never exported),
+  `kubecron_last_run_duration_seconds` (a gauge; alert rules cannot express
+  themselves against the existing histogram), `kubecron_last_run_cpu_millicores`
+  and `kubecron_last_run_memory_bytes`, `kubecron_cluster_cronjobs`,
+  `kubecron_cluster_metrics_api_available` (so a flat resource gauge is
+  distinguishable from a dead metrics-server), and `kubecron_build_info`.
+- **HTTP request metrics** — `kubecron_http_requests_total` and
+  `kubecron_http_request_duration_seconds`, labelled by matched route pattern
+  rather than raw path, so per-CronJob URLs cannot inflate cardinality.
+
+### Fixed
+
+- **Gauge metrics now survive a restart (OBS-3)** — every gauge was previously
+  written only by live watcher events, so after each restart
+  `kubecron_last_run_status`, `kubecron_last_run_timestamp` and the run counters
+  had **no series at all** until each CronJob next happened to fire — up to a
+  full day for a nightly backup, exactly when a restart makes alerting most
+  valuable. Alert rules written against them silently stopped evaluating. A
+  state collector now derives them from stored state every 30 s, making them a
+  function of the database rather than of process uptime. Counters and the
+  duration histogram stay event-driven, since rebuilding them each pass would
+  double-count. A run still in flight keeps its previous values instead of being
+  zeroed, and a CronJob that has never run publishes no `last_run_status` rather
+  than a `0` claiming a success that never happened.
+- **Single-cluster installs no longer render the same dashboard twice** — with
+  one cluster the fleet summary and that cluster's own summary are the same
+  numbers, so `/` now redirects to the cluster view (which also lists the
+  CronJobs), carrying the selected window across. The Overview nav link appears
+  only when there is more than one cluster to compare.
+- **Deterministic lint (INFRA-4)** — CI installed golangci-lint from the **v1**
+  module path, where `@latest` can never resolve v2 (v2 moved to
+  `.../v2/cmd/golangci-lint`). CI was therefore frozen on the final v1 release
+  and never picked up a new check again, while anyone running a current v2
+  locally saw 15 findings CI had never reported. A committed `.golangci.yml`
+  now fixes the semantics and CI installs v2.
+
+### Changed
+
+- **Missed-run detection extracted to `schedule.IsMissed`** — the UI badge and
+  the new `kubecron_cronjob_missed` metric now share one definition instead of
+  two that could drift. Covered by tests including DST and unresolvable zones.
+- **Dependencies** — `k8s.io/{api,apimachinery,client-go,metrics}` 0.36.2 →
+  0.36.3, `github.com/coreos/go-oidc/v3` 3.19.0 → 3.20.0,
+  `github.com/prometheus/client_golang` 1.23.2 → 1.24.1, `modernc.org/sqlite`
+  1.53.0 → 1.56.0, `actions/setup-go` v6 → v7.
+
+### Security
+
+- **Audit pass 2026-08-11 opened SEC-28 (HIGH), not yet fixed** — the Helm chart
+  allows `ingress.enabled=true` with `oidc.enabled=false` (the default), which
+  exposes `suspend`/`resume`/`trigger` unauthenticated on every connected
+  cluster, with no warning from the chart, `NOTES.txt`, or the startup log. Until
+  it is fixed, **do not enable the Ingress without also enabling OIDC.** See
+  `docs/AUDIT.md`.
+
+---
+
 ## [0.2.0] - 2026-07-25
 
 The "stop being wrong" release: the three findings that made the dashboard

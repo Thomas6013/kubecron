@@ -14,7 +14,7 @@ KubeCron is a **single-binary Go application** that monitors Kubernetes CronJob 
 - **Kubernetes**: `k8s.io/client-go` informers (CronJob, Job, Pod), MetricsClient for resource sampling
 - **Frontend**: HTMX 2.x (CDN) + custom CSS (`internal/ui/static/app.css`, embedded) + Chart.js (CDN) — no Node.js build step
 - **Auth**: OIDC optional (`coreos/go-oidc/v3` + `golang.org/x/oauth2`); HMAC-signed session cookie, 24 h TTL
-- **Metrics**: Prometheus via `prometheus/client_golang`; 6 wired metrics exposed at `/metrics`
+- **Metrics**: Prometheus via `prometheus/client_golang`; 14 wired metrics exposed at `/metrics`. Gauges are re-derived from the DB by `metrics.StateCollector` every 30 s so they survive a restart; counters/histograms stay event-driven
 - **Infra**: Two-stage Dockerfile (`golang:1.26-alpine` build → `gcr.io/distroless/static:nonroot`), CI with golangci-lint + SBOM + cosign; images currently `linux/amd64` only (arm64 planned — AUDIT INFRA-3)
 
 ---
@@ -39,6 +39,7 @@ internal/
     html_components.go        # Reusable CronJob row, run row, action buttons, table headers
     html_log.go               # logSearchBar, logSearchJS
     html_chart.go             # sparklineSVG, heatmapHTML
+    html_overview.go          # statTile, topList, rangeSwitchFor, sectionHeading, byte/CPU formatting
   auth/
     auth.go                   # OIDC discovery, login/callback/logout, session management
   cluster/
@@ -63,7 +64,8 @@ internal/
     queries.go                # All SQL operations (upsert, list, update, delete)
     retention.go              # Background cleanup (delete runs older than RETENTION_DAYS)
   metrics/
-    metrics.go                # Prometheus collectors (wired: runs_total, duration, last_status, suspended, next_run)
+    metrics.go                # Prometheus collectors (14 families, all wired)
+    collector.go              # StateCollector: re-derives gauges from stored state every 30 s (OBS-3)
   schedule/
     next.go                   # Compute next N runs from cron expression
   ui/
@@ -162,6 +164,10 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
+### Security — HIGH Priority
+
+- **SEC-28** — the Helm chart will ship an **unauthenticated control plane**: `ingress.enabled=true` with `oidc.enabled=false` (the default) exposes `suspend`/`resume`/`trigger` to anyone who can reach the Ingress, on every connected cluster. When OIDC is off, `server.go` makes the operator gate a deliberate pass-through and the auth middleware is never installed. Nothing warns — not the chart, not `NOTES.txt`, not the startup log; `ingress.tls` also defaults to empty. Fix: `fail` in the chart on that combination unless `ingress.acknowledgeInsecure=true`, plus a startup `slog.Warn` and a line in `NOTES.txt`/README.
+
 ### Security — Medium Priority
 
 - **SEC-22** — htmx/Chart.js/fonts loaded from CDNs without SRI; breaks air-gapped installs. Fix: vendor into `internal/ui/static/`.
@@ -170,12 +176,14 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
 - **SEC-23 (partial)** — nosniff/XFO/Referrer-Policy shipped; CSP (needs inline-script nonce refactor) and HSTS still missing.
 - **SEC-24** — rate limiter proxy-blind (`RemoteAddr` behind ingress = collective lockout) with unbounded bucket map.
-- **INFRA-1** — base images use floating tags. Fix: pin with `@sha256:...`.
+- **SEC-29** — `/metrics` is auth-exempt and now discloses the full cluster/namespace/CronJob inventory, schedules, run outcomes and resource usage. Keep it off the public Ingress; scope the scrape with a NetworkPolicy.
+- **INFRA-1** — base images use floating tags. Fix: pin with `@sha256:...` — but **only after SUP-1**, or the pin freezes a vulnerable stdlib into every release.
 
 ### Infra & CI — Medium Priority
 
+- **SUP-1** — no CVE gate in CI. `govulncheck ./...` reports 14 reachable stdlib advisories at the `go 1.26.0` floor; the release image escapes them only because `golang:1.26-alpine` floats. Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` **before** pinning digests (INFRA-1).
 - **INFRA-3** — release images are `linux/amd64` only; the arm64 claim is not implemented in `docker-publish.yml` (no QEMU step). Implement or drop the claim.
-- **INFRA-5** — CI is skipped entirely for `renovate[bot]`; once Renovate is enabled its PRs would merge untested.
+- **INFRA-5** — CI is skipped entirely for `renovate[bot]`; Renovate already has nine open branches, so its PRs would merge untested.
 
 ### Performance — Medium Priority
 
@@ -190,20 +198,23 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 - **DOM-1** — `spec.timeZone` now honoured end to end _(v0.2.0)_. `schedule.{Parse,NextRun,PrevRun}` take an IANA zone; `cmd/kubecron` imports `time/tzdata` because distroless ships no zoneinfo. An unresolvable schedule or zone renders `unresolved` rather than a wrong countdown.
 - **BUG-20** — deleted CronJobs/clusters are soft-deleted _(v0.2.0)_: hidden from listings, Prometheus series dropped, history preserved, revived on recreation. Caught by `OnDelete`, by a post-cache-sync `Reconcile` (for deletions that happened while KubeCron was down), and by `MarkClustersDeletedExcept` on kubeconfig load.
 - **PERF-2** — fixed by indexing, not batching _(v0.2.0)_. Migration 000006's `job_runs(cronjob_id, started_at DESC)` removes the temp-B-tree sort behind each row read. A window-function batch was measured at 4–16× slower and rejected; see the comment above `GetCronJobSummaries` before attempting it again.
+- **OBS-3 / OBS-4** — gauge metrics survive restarts _(v0.3.0)_. They were previously written only by live watcher events, so a fresh process served no `last_run_status` series at all until each CronJob next fired. `metrics.StateCollector` now re-derives them from the DB every 30 s; counters and the histogram stay event-driven because rebuilding them would double-count. Eight further families added — see `internal/metrics/metrics.go`.
+- **INFRA-4** — lint is deterministic _(v0.3.0)_. CI installed golangci-lint from the **v1** module path, where `@latest` can never resolve v2, so CI silently froze on the last v1 while local v2 reported 15 findings CI never saw. `.golangci.yml` pins the semantics; CI installs `/v2/`.
+- **MAINT-2** — missed-run detection lives once, in `schedule.IsMissed` _(v0.3.0)_, shared by the UI badge and `kubecron_cronjob_missed`.
 
 ---
 
 ## Code Conventions
 
 - **No CGO**: always build with `CGO_ENABLED=0`.
-- **UI rendering**: all HTML is generated in `internal/api/html.go`, `html_components.go`, `html_log.go`, and `html_chart.go` via `fmt.Fprintf`. No template engine. When adding a new UI component, add a helper to `html_components.go` (reusable row/card) or the appropriate thematic file rather than inlining HTML in handlers.
+- **UI rendering**: all HTML is generated in `internal/api/html.go`, `html_components.go`, `html_log.go`, `html_chart.go`, and `html_overview.go` via `fmt.Fprintf`. No template engine. When adding a new UI component, add a helper to `html_components.go` (reusable row/card) or the appropriate thematic file rather than inlining HTML in handlers.
 - **SQL**: all queries in `internal/storage/queries.go`. New tables = new migration file in `migrations/`.
 - **Schedules**: never evaluate a cron expression without its zone. Every `schedule` entry point takes an IANA zone name; pass `cj.TZ()`. On error, show nothing rather than a wrong time — a wrong countdown is worse than an absent one.
 - **Error handling**: never return raw K8s API or DB errors to HTTP clients. Log with `slog.Error()`, return 500.
 - **Secrets**: never log kubeconfig paths or content, OIDC secrets, or session keys.
 - **Versioning**: update `CHANGELOG.md` and the `Version` constant in `internal/version/version.go` on every release.
 - **RBAC**: any new K8s API access must be added to `charts/kubecron/templates/clusterrole.yaml`.
-- **Docker images**: published only on `*.*.*` tag push — `git tag 0.2.0 && git push origin 0.2.0`.
+- **Docker images**: published only on `*.*.*` tag push — `git tag 0.3.0 && git push origin 0.3.0`.
 
 ---
 

@@ -145,7 +145,7 @@ func main() {
 		}
 	}()
 
-	// 11. Block until shutdown signal, then drain gracefully.
+	// 12. Block until shutdown signal, then drain gracefully.
 	<-ctx.Done()
 	slog.Info("shutdown signal received, draining (timeout 30s)…")
 
