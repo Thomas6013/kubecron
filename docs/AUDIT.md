@@ -14,7 +14,7 @@
 | Pass date | Model | Score | HIGH open | New findings | Closures | Notes |
 |---|---|---|---|---|---|---|
 | 2026-07-08 | Claude Fable 5 | 7.5/10 | 0 | 26 (0 H / 6 M / 13 L / 7 I) | 6 prior-pass verified fixed | Baseline document; prior audit doc lost, carry-overs reconstructed from CHANGELOG/CLAUDE.md |
-| 2026-08-11 | Claude Opus 5 | 7.5/10 | **1** | 5 (1 H / 3 M / 1 L) | 3 (OBS-3 + INFRA-4 found-and-fixed in-pass; MAINT-2 in-pass) | First HIGH in this document's history (SEC-28, chart-level). `govulncheck` run for the first time. Overview/metrics feature reviewed as part of the pass. |
+| 2026-08-11 | Claude Opus 5 | 7.5/10 | **1** | 6 (1 H / 3 M / 1 L / 1 I) | 4 in-pass (OBS-3, OBS-4, INFRA-4, MAINT-2) + 3 verified closed from v0.2.0 (DOM-1, BUG-20, PERF-2) | First HIGH in this document's history (SEC-28, chart-level). `govulncheck` run for the first time. Overview/metrics feature reviewed as part of the pass. |
 
 ## Severity Classification Rubric
 
@@ -143,7 +143,7 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 
 ### Highlights since the last pass
 
-`v0.2.0` closed the two findings that made the dashboard *lie* — DOM-1 (timezone-aware schedules) and BUG-20 (soft-deleted CronJobs/clusters) — plus PERF-2 by indexing. All three re-verified at their cited locations this pass. This pass adds the fleet/cluster summary views, eight metric families, and the state collector; and closes INFRA-4 after diagnosing why it had never actually bitten.
+`v0.2.0` closed the two findings that made the dashboard *lie* — DOM-1 (timezone-aware schedules) and BUG-20 (soft-deleted CronJobs/clusters) — plus PERF-2 by indexing. All three re-verified at their cited locations this pass. This pass adds the fleet/cluster summary views, ten metric families, and the state collector; and closes INFRA-4 after diagnosing why it had never actually bitten.
 
 ### HIGH
 
@@ -192,7 +192,7 @@ Fixed by `internal/metrics/collector.go`: a 30 s ticker derives every gauge from
 **OBS-4 — The metric set had real gaps.** *(found and fixed this pass)*
 Six families existed; none covered in-flight runs (so a hung or overlapping run was unalertable), missed schedules (the single best "my backup stopped firing" signal — computed for the UI badge since the first pass but never exported), last-run duration as a gauge (only a histogram, which alert rules cannot express against), last-run CPU/memory (the product samples resources and exported none of it), per-cluster inventory or Metrics-API health (so a resource gauge going flat was indistinguishable from a dead metrics-server), build info, or any HTTP traffic signal.
 
-Added in `internal/metrics/metrics.go`: `runs_active`, `cronjob_missed`, `last_run_duration_seconds`, `last_run_cpu_millicores`, `last_run_memory_bytes`, `cluster_cronjobs`, `cluster_metrics_api_available`, `build_info`, `http_requests_total`, `http_request_duration_seconds`. The HTTP pair is labelled by **`r.Pattern`, the matched ServeMux route**, never `r.URL.Path` — paths embed cluster/namespace/CronJob/run identifiers and would mint a series per object; unrouted requests collapse to a single `unmatched` label since that path is attacker-controlled.
+Added in `internal/metrics/metrics.go` (ten families, 6 → 16): `runs_active`, `cronjob_missed`, `last_run_duration_seconds`, `last_run_cpu_millicores`, `last_run_memory_bytes`, `cluster_cronjobs`, `cluster_metrics_api_available`, `build_info`, `http_requests_total`, `http_request_duration_seconds`. The HTTP pair is labelled by **`r.Pattern`, the matched ServeMux route**, never `r.URL.Path` — paths embed cluster/namespace/CronJob/run identifiers and would mint a series per object; unrouted requests collapse to a single `unmatched` label since that path is attacker-controlled.
 
 ### LOW
 
@@ -340,7 +340,7 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [ ] Pagination cursor index-friendly and gap-free (BUG-21)
 
 ### Observability
-- [x] Structured slog everywhere; 14 Prometheus collectors wired *(6 → 14, 2026-08-11)*
+- [x] Structured slog everywhere; 16 Prometheus collector families wired *(6 → 16, 2026-08-11)*
 - [x] `/readyz` gates on initial informer sync
 - [ ] Informer liveness signal after initial sync (OBS-2)
 - [ ] Unauthenticated/denied requests visible in access logs (OBS-1)

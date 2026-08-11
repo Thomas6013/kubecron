@@ -29,7 +29,7 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 - **Multi-cluster** — one kubeconfig file per cluster in a directory; all clusters shown in a unified dashboard
 - **Focus rankings** — every view leads with success rate, failures, in-flight and suspended counts, then ranks CronJobs by most failures, longest mean duration, and highest peak CPU / memory over 24 h, 7 d or 30 d. Fleet-wide when you run several clusters, per-cluster on the cluster view
 - **OIDC authentication** — optional SSO via Keycloak, Dex, Google, or any OIDC provider
-- **Prometheus metrics** — 14 metric families at `/metrics` for Grafana integration, including missed-schedule and in-flight-run gauges. Gauges are re-derived from the database every 30 s, so they keep reporting across a restart instead of going blank until each CronJob next fires
+- **Prometheus metrics** — 16 metric families at `/metrics` for Grafana integration, including missed-schedule and in-flight-run gauges. Gauges are re-derived from the database every 30 s, so they keep reporting across a restart instead of going blank until each CronJob next fires
 
 ---
 

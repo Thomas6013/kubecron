@@ -41,7 +41,7 @@ for engineering findings behind the AUDIT ids, see [`docs/AUDIT.md`](docs/AUDIT.
 - [ ] **Cross-run log search** — SQLite FTS5 over `log_lines`, searchable across runs and clusters, over logs of pods that no longer exist _(PRODUCT §4.1)_
 - [ ] **Failure fingerprinting** — normalise and group error signatures to show recurrence across clusters _(PRODUCT §4.2)_
 - [ ] **Right-sizing + cost** — join stored requests/limits against observed peaks; cost per run from `resource_samples` _(PRODUCT §5.1–5.2)_
-- [ ] **Grafana dashboard** — pre-built dashboard JSON for `kubecron_*` metrics (14 families as of v0.3.0, incl. `kubecron_cronjob_missed` and `kubecron_runs_active`)
+- [ ] **Grafana dashboard** — pre-built dashboard JSON for `kubecron_*` metrics (16 families as of v0.3.0, incl. `kubecron_cronjob_missed` and `kubecron_runs_active`)
 - [x] **Pagination** — cursor-based "Load more" for run history; heatmap click-to-filter by day; blue "running" tile indicator _(v0.2.0)_
 - [ ] **CronJob annotations** — display description, owner, runbook link from K8s annotations
 - [ ] **Dark / light mode toggle**

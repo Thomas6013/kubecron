@@ -30,7 +30,7 @@ attention, and metrics that keep telling you so after a restart.
 - **Cluster control in the nav** — a picker when there are several clusters, a
   plain label naming the cluster when there is exactly one, nothing when there
   are none. A single-option dropdown is a control that cannot do anything.
-- **Eight new Prometheus metrics** — `kubecron_runs_active` (hung or overlapping
+- **Ten new Prometheus metrics** — `kubecron_runs_active` (hung or overlapping
   runs), `kubecron_cronjob_missed` (a schedule that silently stopped firing —
   computed for the UI badge since the beginning but never exported),
   `kubecron_last_run_duration_seconds` (a gauge; alert rules cannot express
