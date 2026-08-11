@@ -14,7 +14,7 @@
 | Pass date | Model | Score | HIGH open | New findings | Closures | Notes |
 |---|---|---|---|---|---|---|
 | 2026-07-08 | Claude Fable 5 | 7.5/10 | 0 | 26 (0 H / 6 M / 13 L / 7 I) | 6 prior-pass verified fixed | Baseline document; prior audit doc lost, carry-overs reconstructed from CHANGELOG/CLAUDE.md |
-| 2026-08-11 | Claude Opus 5 | 7.5/10 | **1** | 6 (1 H / 3 M / 1 L / 1 I) | 4 in-pass (OBS-3, OBS-4, INFRA-4, MAINT-2) + 3 verified closed from v0.2.0 (DOM-1, BUG-20, PERF-2) | First HIGH in this document's history (SEC-28, chart-level). `govulncheck` run for the first time. Overview/metrics feature reviewed as part of the pass. |
+| 2026-08-11 | Claude Opus 5 | 8/10 | **0** | 6 (1 H / 3 M / 1 L / 1 I) | 5 in-pass (SEC-28, OBS-3, OBS-4, INFRA-4, MAINT-2) + 3 verified closed from v0.2.0 (DOM-1, BUG-20, PERF-2) | First HIGH in this document's history (SEC-28, chart-level). `govulncheck` run for the first time. Overview/metrics feature reviewed as part of the pass. |
 
 ## Severity Classification Rubric
 
@@ -32,9 +32,11 @@
 
 ### Pass 2026-08-11
 
-**Score: 7.5/10 (unchanged — but the composition moved).** Two of the previous pass's most damaging MEDIUMs are gone for good (DOM-1, BUG-20, both closed in v0.2.0 and re-verified here), the observability story improved materially this pass, and lint is finally deterministic. Against that, this pass opens the **first HIGH in this document's history** — not in the Go code, which remains sound, but in the Helm chart's exposure model. Net: same number, healthier core, one blocking item.
+**Score: 8/10 (up from 7.5).** Two of the previous pass's most damaging MEDIUMs are gone for good (DOM-1, BUG-20, both closed in v0.2.0 and re-verified here), the observability story went from the weakest dimension to a genuine strength, and lint is deterministic for the first time. This pass also opened the **first HIGH in this document's history** — not in the Go code, which remains sound, but in the Helm chart's exposure model — and closed it in the same pass. The half-point is for observability and packaging safety; what still holds it below 8.5 is the untouched MEDIUM tail (SEC-22 CDN, SUP-1 CVE gate, INFRA-3 arm64) and a test suite with no coverage threshold.
 
-**The HIGH (SEC-28).** `oidc.enabled` and `ingress.enabled` both default to `false`, so a default install is safe (ClusterIP, port-forward only). But enabling the Ingress is the documented way to actually use the UI, and nothing — not a chart `fail`, not `NOTES.txt`, not a startup log — objects when it is turned on with OIDC still off. The result is an internet-reachable endpoint where a single unauthenticated `POST` suspends or triggers CronJobs across **every connected cluster**. The authorization code is correct; the packaging simply never forces the operator to notice that they have turned it off. `NOTES.txt` even prints the public URL with no caveat.
+**The HIGH (SEC-28) — found and fixed this pass.** `oidc.enabled` and `ingress.enabled` both default to `false`, so a default install was already safe (ClusterIP, port-forward only). But enabling the Ingress is the documented way to actually use the UI, and nothing — not a chart `fail`, not `NOTES.txt`, not a startup log — objected when it was turned on with OIDC still off. The result was an internet-reachable endpoint where a single unauthenticated `POST` suspends or triggers CronJobs across **every connected cluster**. The authorization code was correct throughout; the packaging simply never forced the operator to notice they had turned it off.
+
+The fix covers the *class*, not the reported instance: `kubecron.validateExposure` fails the install for `ingress.enabled=true` **and** for any `service.type` other than `ClusterIP`, since a LoadBalancer or NodePort leaves the cluster just as effectively. It lives in `_helpers.tpl` and is invoked from `deployment.yaml` — the one template that always renders — so it cannot be skipped by whichever resource happens to be disabled. `security.acknowledgeInsecureExposure` is the deliberate escape hatch for upstream-authenticated installs. Because no chart guard can reach a raw manifest, a Compose file or `go run`, the binary also logs a `WARN` at startup whenever OIDC is off. Verified across six `helm template` combinations.
 
 **Observability was the weakest dimension and is now the most improved.** OBS-3 (found and fixed in this pass) was the significant one: every gauge-valued series was written only by live watcher events, so after each restart `kubecron_last_run_status` and friends had *no series at all* until each CronJob next happened to fire — up to 24 h for a nightly backup, precisely when a restart makes alerting most valuable. Verified empirically: a fresh process exposed 2 of 6 metric families. A DB-derived state collector now makes those gauges a function of stored state rather than of process uptime, and the previously-unexported "missed run" verdict — the single best signal that a schedule silently stopped firing — is now a metric.
 
@@ -42,7 +44,7 @@
 
 **Dimensions n/a for this project** (unchanged): multi-tenant isolation (single-tenant ops tool by design); public-production/GDPR (no end-user PII beyond operator emails); microservice decomposition (the monolith is correct and justified in-chart).
 
-**Biggest forward risk:** shifted from doc drift to **packaging-vs-code drift**. The Go code enforces a careful operator/viewer split that the chart lets you switch off wholesale without a word. Doc drift, last pass's top risk, is materially better — CLAUDE.md now matches the code on timezone handling, soft deletes and indexing.
+**Biggest forward risk:** the **supply-chain ordering trap (SUP-1 × INFRA-1)**. Pinning base-image digests is on the roadmap and reads like pure hardening, but today the floating `golang:1.26-alpine` tag is the only thing keeping the shipped stdlib patched. Pinning before a CVE gate exists would silently freeze a vulnerable stdlib into every release — a regression disguised as a security improvement. Packaging-vs-code drift, this pass's other candidate, is now defended by the `validateExposure` guard; doc drift, last pass's top risk, is materially better.
 
 ### Pass 2026-07-08 (bootstrap)
 
@@ -98,7 +100,7 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 | DOC-3 | 2026-07-08 | LOW | docs | CLAUDE.md: "Tailwind CDN" (none used), "single-stage Dockerfile" (two stages) | FIXED 2026-07-08 — CLAUDE.md corrected this pass | n/a |
 | DOC-4 | 2026-07-08 | LOW | docs | CLAUDE.md claimed `go test -race` missing — present in `ci.yml` | FIXED 2026-07-08 — CLAUDE.md corrected this pass | n/a |
 | DOC-5 | 2026-07-08 | LOW | docs | `docker-compose.yaml` comments in French (house rule: English); README says `:8080`, compose exposes `:8082` | OPEN | n/a |
-| SEC-28 | 2026-08-11 | **HIGH** | helm | `ingress.enabled=true` + `oidc.enabled=false` exposes unauthenticated suspend/resume/trigger across every cluster; no chart guard, no NOTES warning, no startup log | **OPEN** | no |
+| SEC-28 | 2026-08-11 | **HIGH** | helm | `ingress.enabled=true` + `oidc.enabled=false` exposes unauthenticated suspend/resume/trigger across every cluster; no chart guard, no NOTES warning, no startup log | FIXED 2026-08-11 — `kubecron.validateExposure` fails the install (covers `service.type != ClusterIP` too), `security.acknowledgeInsecureExposure` escape hatch, startup `slog.Warn`, `NOTES.txt` banner | `helm template` matrix, 6 combinations |
 | SUP-1 | 2026-08-11 | MED | ci | No CVE gate (`govulncheck`/image scan) in CI; 14 reachable stdlib advisories at pinned-minimum toolchain. Must be fixed **before** INFRA-1 digest-pinning | OPEN | no |
 | SEC-29 | 2026-08-11 | LOW | api | `/metrics` is auth-exempt (`auth.go:172`) and now exposes full cluster/namespace/CronJob inventory, schedules, run outcomes and resource usage | OPEN | no |
 | OBS-3 | 2026-08-11 | MED | metrics | Gauge series written only by live watcher events → absent after every restart until each CronJob next fires (verified: 2 of 6 families on a fresh process) | FIXED 2026-08-11 — `metrics.StateCollector` derives them from stored state every 30 s; counters/histogram stay event-driven | `fleet_test.go`, `missed_test.go` (rule shared with UI) |
@@ -147,7 +149,7 @@ Prior-audit IDs (document lost) reconstructed from CHANGELOG/code references, th
 
 ### HIGH
 
-**SEC-28 — Ingress without OIDC is an unauthenticated control plane, and nothing says so.**
+**SEC-28 — Ingress without OIDC is an unauthenticated control plane, and nothing says so.** *(fixed in this pass)*
 `charts/kubecron/values.yaml:23` (`oidc.enabled: false`) and `:71` (`ingress.enabled: false`) are both safe defaults in isolation: with no Ingress, the Service is ClusterIP and `NOTES.txt` tells the operator to `port-forward`. The failure is the *combination*, which is also the documented path to actually using the product — README lists `ingress.enabled` as the way to "Expose via Ingress" (`README.md:80`) with no mention of authentication.
 
 When `authenticator` is nil, `server.go:81` makes the operator gate a pass-through by design:
@@ -163,15 +165,14 @@ so `POST /api/clusters/{id}/cronjobs/{ns}/{name}/suspend|resume|trigger` are rea
 
 Aggravating: `ingress.tls` defaults to `[]`, so the template emits no `tls:` block — the default Ingress is plaintext HTTP.
 
-Fix (all three, they are independent defences):
-1. Guard the chart — refuse the combination unless explicitly acknowledged:
-   ```yaml
-   {{- if and .Values.ingress.enabled (not .Values.oidc.enabled) (not .Values.ingress.acknowledgeInsecure) }}
-   {{- fail "ingress.enabled=true with oidc.enabled=false exposes unauthenticated suspend/resume/trigger on every connected cluster. Set oidc.enabled=true, or ingress.acknowledgeInsecure=true if the Ingress is on a trusted network." }}
-   {{- end }}
-   ```
-2. Log it at startup in `cmd/kubecron/main.go`, once, at `Warn`: OIDC disabled → all endpoints including mutating ones are unauthenticated.
-3. Say it in `NOTES.txt` and in the README's ingress row.
+**Fixed 2026-08-11**, and broadened from the reported instance to the class — any externally-reachable Service type, not just an Ingress. Three independent defences:
+1. **`kubecron.validateExposure`** (`charts/kubecron/templates/_helpers.tpl`) fails the render when `oidc.enabled=false` and either `ingress.enabled=true` or `service.type != "ClusterIP"`. It is invoked from `deployment.yaml` rather than from `ingress.yaml`/`service.yaml`, because the Deployment is the one template that always renders — a validation that lives inside a conditional resource can be skipped by disabling that resource.
+2. **`security.acknowledgeInsecureExposure`** (default `false`) is the escape hatch. "ClusterIP behind a mesh, auth enforced upstream" is a legitimate deployment, but it now has to be stated rather than arrived at by leaving a default alone. Deliberately top-level rather than under `ingress.`, since it governs both exposure paths.
+3. **Startup `slog.Warn`** in `cmd/kubecron/main.go` whenever OIDC is disabled, and a **`NOTES.txt` banner** after every install. No chart guard can reach a raw manifest, a Compose file, or `go run`; the binary can.
+
+Verified across six `helm template` combinations: default ClusterIP renders; ingress-on / LoadBalancer / NodePort each block with a message naming the offending value; ingress + OIDC renders; ingress + acknowledgement renders.
+
+*Residual:* `ingress.tls` still defaults to `[]`, so an Ingress is plaintext unless configured. Not folded into the guard — TLS is frequently terminated upstream, and failing on it would produce false positives. Called out in the README instead.
 
 ### MEDIUM
 
@@ -199,7 +200,7 @@ Added in `internal/metrics/metrics.go` (ten families, 6 → 16): `runs_active`, 
 **SEC-29 — `/metrics` is unauthenticated and now says considerably more.**
 `auth.go:172` exempts `/metrics` from the session check alongside `/healthz` and `/readyz`. That is conventional — Prometheus needs to scrape it — but the endpoint now discloses, to anyone who can reach the pod: every cluster name, every namespace, every CronJob name, each one's next scheduled fire time, its last outcome, its duration, and its peak CPU/memory. That is a fairly complete map of an organisation's batch infrastructure and its backup windows.
 
-Not raised higher because it exposes no credentials and the service is ClusterIP by default — but note it compounds SEC-28: with an Ingress and no OIDC, `/metrics` is public too.
+Not raised higher because it exposes no credentials and the service is ClusterIP by default. It used to compound SEC-28 — with an Ingress and no OIDC, `/metrics` was public too — but the SEC-28 guard now forces OIDC (or an explicit acknowledgement) before any external exposure exists. Note the exemption still stands *within* the cluster, and `/metrics` remains reachable through the Ingress path even with OIDC on, since `auth.Middleware` skips it by design so Prometheus can scrape.
 
 Fix: document that `/metrics` must be reached via a NetworkPolicy-scoped scrape rather than the public Ingress; optionally support a bearer token for the scrape endpoint, or a separate listener port that the Ingress does not route.
 
@@ -305,8 +306,10 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 - [x] Raw upstream errors never reach clients (SEC-21 — fixed 2026-07-09)
 - [ ] Rate limiter proxy-aware and bounded (SEC-24)
 - [x] RBAC minimal per verb/resource pair (SEC-26 — fixed 2026-07-09)
-- [ ] **Packaging cannot silently ship an unauthenticated deployment** — chart refuses or loudly warns on `ingress.enabled && !oidc.enabled` (SEC-28) *(added 2026-08-11)*
-- [ ] Default Ingress requires TLS, or says why not (SEC-28 aggravator)
+- [x] **Packaging cannot silently ship an unauthenticated deployment** — `kubecron.validateExposure` fails on `ingress.enabled` *or* non-ClusterIP `service.type` while OIDC is off (SEC-28) *(added 2026-08-11)*
+- [x] The guard covers every exposure path the chart offers, not just the one that was reported — **re-check this helper whenever a new exposure path is added** *(added 2026-08-11)*
+- [x] Runtime warns when it is unauthenticated, since no chart guard reaches raw manifests / Compose / `go run` *(added 2026-08-11)*
+- [ ] Default Ingress requires TLS, or says why not (`ingress.tls` still defaults to empty — documented, not enforced)
 - [ ] `/metrics` exposure scoped — not routed by the public Ingress (SEC-29) *(added 2026-08-11)*
 - [x] Any SQL text assembled in Go comes from a closed allow-list, never a caller string (`rankValueExpr`, `queries.go`) *(added 2026-08-11)*
 
@@ -380,22 +383,21 @@ All six pre-2026-07 fixes re-verified at their cited locations (see tracking tab
 
 ### Pass 2026-08-11
 
-**Ship-readiness: yes for `helm install` defaults, no for an Ingress deployment until SEC-28 is addressed.** The Go code is in its best shape yet — the two findings that made the dashboard lie are closed, observability went from the weakest dimension to a genuine strength, and the lint gate is deterministic for the first time. The blocker is packaging, not code: the chart will happily publish an unauthenticated control plane for every connected cluster and never mention it.
+**Ship-readiness: yes.** No CRITICAL or HIGH open. The Go code is in its best shape yet — the two findings that made the dashboard lie are closed, observability went from the weakest dimension to a genuine strength, and the lint gate is deterministic for the first time. The one HIGH this pass raised (SEC-28) was closed in the same pass, and broadened beyond the reported instance to every exposure path the chart offers.
 
-**Remaining blockers:** SEC-28 (HIGH). Nothing else blocks.
+**Remaining blockers:** none. The MEDIUM tail (SEC-22, SUP-1, INFRA-3, PERF-1, TEST-1) is real but none of it blocks a 0.3.0 tag.
 
 **Highest-leverage next moves:**
-1. **SEC-28 — three small edits, one HIGH closed.** A `fail` guard in the chart, a `slog.Warn` at startup when OIDC is off, and a sentence each in `NOTES.txt` and the README ingress row. None of it is more than an hour, and it is the only thing standing between this repo and a clean HIGH column.
-2. **SUP-1 before INFRA-1.** Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` *first*; pinning base-image digests before the gate exists would convert today's accidental patching into a permanent freeze. Doing these in the wrong order is worse than doing neither.
-3. **INFRA-5 — drop the `renovate[bot]` CI skip.** Nine Renovate branches are already open; this pass merged eight bumps by hand precisely because their PRs would have been untested. The condition inverts the point of a dependency bot.
-4. **SEC-22 — vendor htmx and Chart.js.** Unchanged from the last two passes' recommendation, and now the oldest open MEDIUM. `embed.FS` is already wired; this is mostly a download and two `<script>` edits, and it closes the CDN supply-chain path while making air-gapped installs work.
+1. **SUP-1 before INFRA-1.** Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` *first*; pinning base-image digests before the gate exists would convert today's accidental patching into a permanent freeze. Doing these in the wrong order is worse than doing neither.
+2. **INFRA-5 — drop the `renovate[bot]` CI skip.** Nine Renovate branches are already open; this pass merged eight bumps by hand precisely because their PRs would have been untested. The condition inverts the point of a dependency bot.
+3. **SEC-22 — vendor htmx and Chart.js.** Unchanged from the last two passes' recommendation, and now the oldest open MEDIUM. `embed.FS` is already wired; this is mostly a download and two `<script>` edits, and it closes the CDN supply-chain path while making air-gapped installs work.
 
 **Audit-pass progress summary:**
 
 | Pass | Score | OPEN HIGH | OPEN MED | Closures that pass |
 |---|---|---|---|---|
 | 2026-07-08 | 7.5/10 | 0 | 8 | 6 verified from prior lost pass + 3 DOC fixed in-pass |
-| 2026-08-11 | 7.5/10 | **1** (SEC-28) | 5 (SEC-22, INFRA-3, PERF-1, TEST-1 partial, SUP-1) | DOM-1, BUG-20, PERF-2 verified closed in v0.2.0; OBS-3, OBS-4, INFRA-4, MAINT-2 found-and-fixed in-pass |
+| 2026-08-11 | 8/10 | **0** | 5 (SEC-22, INFRA-3, PERF-1, TEST-1 partial, SUP-1) | DOM-1, BUG-20, PERF-2 verified closed in v0.2.0; SEC-28, OBS-3, OBS-4, INFRA-4, MAINT-2 found-and-fixed in-pass |
 
 ### Pass 2026-07-08 (bootstrap)
 

@@ -126,6 +126,15 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("OIDC authentication enabled", "issuer", cfg.OIDC.IssuerURL)
+	} else {
+		// The Helm chart refuses to install an externally-reachable release with
+		// OIDC off (SEC-28), but nothing stops a raw manifest, a Compose file or
+		// a `go run` from doing it. Say so once, loudly, at Warn: without OIDC
+		// the operator gate in api.Server is a pass-through and the auth
+		// middleware is never installed, so suspend/resume/trigger are anonymous
+		// on every cluster whose kubeconfig is mounted.
+		slog.Warn("OIDC is disabled — all endpoints are UNAUTHENTICATED, including suspend/resume/trigger on every connected cluster; do not expose this service outside a trusted network",
+			"remediation", "set OIDC_ENABLED=true")
 	}
 
 	// 10. Prometheus state collector. Republishes the gauge-valued metrics from

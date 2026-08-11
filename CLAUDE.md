@@ -164,10 +164,6 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
-### Security — HIGH Priority
-
-- **SEC-28** — the Helm chart will ship an **unauthenticated control plane**: `ingress.enabled=true` with `oidc.enabled=false` (the default) exposes `suspend`/`resume`/`trigger` to anyone who can reach the Ingress, on every connected cluster. When OIDC is off, `server.go` makes the operator gate a deliberate pass-through and the auth middleware is never installed. Nothing warns — not the chart, not `NOTES.txt`, not the startup log; `ingress.tls` also defaults to empty. Fix: `fail` in the chart on that combination unless `ingress.acknowledgeInsecure=true`, plus a startup `slog.Warn` and a line in `NOTES.txt`/README.
-
 ### Security — Medium Priority
 
 - **SEC-22** — htmx/Chart.js/fonts loaded from CDNs without SRI; breaks air-gapped installs. Fix: vendor into `internal/ui/static/`.
@@ -201,6 +197,7 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 - **OBS-3 / OBS-4** — gauge metrics survive restarts _(v0.3.0)_. They were previously written only by live watcher events, so a fresh process served no `last_run_status` series at all until each CronJob next fired. `metrics.StateCollector` now re-derives them from the DB every 30 s; counters and the histogram stay event-driven because rebuilding them would double-count. Ten further families added — see `internal/metrics/metrics.go`.
 - **INFRA-4** — lint is deterministic _(v0.3.0)_. CI installed golangci-lint from the **v1** module path, where `@latest` can never resolve v2, so CI silently froze on the last v1 while local v2 reported 15 findings CI never saw. `.golangci.yml` pins the semantics; CI installs `/v2/`.
 - **MAINT-2** — missed-run detection lives once, in `schedule.IsMissed` _(v0.3.0)_, shared by the UI badge and `kubecron_cronjob_missed`.
+- **SEC-28** — the chart can no longer ship an unauthenticated externally-reachable install _(v0.3.0)_. `kubecron.validateExposure` in `_helpers.tpl` (called from `deployment.yaml`, the one template that always renders) fails the install when `ingress.enabled=true` **or** `service.type != ClusterIP` while `oidc.enabled=false`; `security.acknowledgeInsecureExposure=true` is the deliberate escape hatch. Backed by a startup `slog.Warn` (for raw manifests / Compose / `go run`, which no chart guard can reach) and a `NOTES.txt` banner. **Any new exposure path added to the chart must be added to that helper.**
 
 ---
 

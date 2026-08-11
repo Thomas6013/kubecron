@@ -80,12 +80,27 @@ attention, and metrics that keep telling you so after a restart.
 
 ### Security
 
-- **Audit pass 2026-08-11 opened SEC-28 (HIGH), not yet fixed** — the Helm chart
-  allows `ingress.enabled=true` with `oidc.enabled=false` (the default), which
-  exposes `suspend`/`resume`/`trigger` unauthenticated on every connected
-  cluster, with no warning from the chart, `NOTES.txt`, or the startup log. Until
-  it is fixed, **do not enable the Ingress without also enabling OIDC.** See
-  `docs/AUDIT.md`.
+- **The chart can no longer ship an unauthenticated, externally-reachable
+  install (SEC-28, HIGH)** — KubeCron has no authentication of its own: with
+  `oidc.enabled=false` the operator gate in `internal/api/server.go` is a
+  deliberate pass-through and the auth middleware is never installed, so
+  `suspend`/`resume`/`trigger` were anonymous on **every cluster whose
+  kubeconfig is mounted**. Nothing objected when an Ingress was put in front of
+  that. Three independent defences now exist:
+  - `helm install`/`upgrade` **fails** when the service is reachable from
+    outside the cluster (`ingress.enabled=true`, or `service.type` other than
+    `ClusterIP`) while `oidc.enabled=false`, naming the offending value and the
+    ways out. Both exposure paths are covered — a LoadBalancer or NodePort
+    Service leaves the cluster just as effectively as an Ingress.
+  - `security.acknowledgeInsecureExposure=true` is the deliberate escape hatch
+    for installs where authentication is genuinely enforced upstream (an
+    authenticating proxy, a service mesh, a VPN-only ingress). It has to be
+    stated, not arrived at by leaving a default alone.
+  - The binary logs a `WARN` at startup whenever OIDC is disabled — the chart
+    guard cannot help a raw manifest, a Compose file, or `go run` — and
+    `NOTES.txt` says so after every install.
+
+  Existing releases that already run with `oidc.enabled=true` upgrade unchanged.
 
 ---
 

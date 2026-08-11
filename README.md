@@ -78,17 +78,25 @@ Key Helm values:
 | `config.logRetentionDays` | `14` | Days of raw log lines to keep (≤ `retentionDays`) |
 | `config.metricsSampleInterval` | `15` | Resource sampling interval (seconds) |
 | `persistence.size` | `500Mi` | PVC size for SQLite data |
-| `ingress.enabled` | `false` | Expose via Ingress — **see the warning below** |
+| `ingress.enabled` | `false` | Expose via Ingress — requires OIDC, see below |
 | `oidc.enabled` | `false` | Enable OIDC authentication |
+| `security.acknowledgeInsecureExposure` | `false` | Allow external exposure without OIDC (see below) |
 
-> ⚠️ **Do not enable the Ingress without also enabling OIDC.**
-> KubeCron has no authentication of its own: when `oidc.enabled=false`, *every*
-> endpoint is unauthenticated — including `suspend`, `resume` and `trigger`,
-> which act on **every cluster whose kubeconfig is mounted**. Anyone able to
-> reach the Ingress could suspend your backups. Set `oidc.enabled=true` before
-> exposing the service, or keep it on ClusterIP and use `kubectl port-forward`.
-> `ingress.tls` is also empty by default, so configure TLS.
-> Tracked as SEC-28 in [`docs/AUDIT.md`](docs/AUDIT.md); a chart-level guard is planned.
+> ⚠️ **Exposing KubeCron requires authentication.**
+> KubeCron has no authentication of its own: with `oidc.enabled=false`, *every*
+> endpoint is anonymous — including `suspend`, `resume` and `trigger`, which act
+> on **every cluster whose kubeconfig is mounted**.
+>
+> The chart therefore **refuses to install** when the service is reachable from
+> outside the cluster (`ingress.enabled=true`, or `service.type` other than
+> `ClusterIP`) while OIDC is off. Either set `oidc.enabled=true`, or keep the
+> default ClusterIP and use `kubectl port-forward`.
+>
+> If authentication is genuinely enforced upstream — an authenticating proxy, a
+> service mesh, a VPN-only ingress — set
+> `security.acknowledgeInsecureExposure=true` to proceed deliberately.
+>
+> Note that `ingress.tls` is empty by default, so configure TLS as well.
 
 Full list of values: [`charts/kubecron/values.yaml`](charts/kubecron/values.yaml).
 
