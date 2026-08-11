@@ -1,0 +1,25 @@
+# golangci-lint configuration.
+#
+# Without this file the linter's behaviour depended on which major version
+# happened to be installed. CI installed it from the v1 module path, where
+# `@latest` can never resolve v2 (v2 moved to .../v2/cmd/golangci-lint), so CI
+# was pinned to the final v1 release forever while developers running a current
+# v2 locally saw 15 findings CI never reported — all of them the unchecked
+# `defer rows.Close()` / `fmt.Fprintln` calls that v1 excluded by default and v2
+# no longer does.
+#
+# Pinning the config here makes both agree: v2 semantics, with v1's default
+# exclusion presets restored explicitly rather than inherited by accident.
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+
+  exclusions:
+    presets:
+      # Restores EXC0001: unchecked Close/Flush/Fprint-family calls, where the
+      # error is genuinely not actionable.
+      - std-error-handling
+      - common-false-positives
+      - legacy

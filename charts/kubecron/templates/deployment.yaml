@@ -1,3 +1,7 @@
+{{/* Validated here rather than in ingress.yaml/service.yaml: the Deployment is
+     the one template that always renders, so the check cannot be skipped by
+     whichever resource happens to be disabled (SEC-28). */}}
+{{- include "kubecron.validateExposure" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -498,17 +498,57 @@ func TestDashboard_Empty(t *testing.T) {
 	}
 }
 
-func TestDashboard_WithCluster(t *testing.T) {
+// With one cluster the fleet summary and that cluster's own summary are the
+// same numbers, so "/" must not render a second copy of the cluster view —
+// it redirects there instead.
+func TestDashboard_SingleClusterRedirects(t *testing.T) {
 	h, store := newTestHandler(t)
 	seedCluster(t, store)
+
+	w := httptest.NewRecorder()
+	h.Dashboard(w, httptest.NewRequest("GET", "/", nil))
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("want 303, got %d", w.Code)
+	}
+	if got, want := w.Header().Get("Location"), "/clusters/"+testClusterID+"?days=7"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+// The selected window must survive the redirect, or following it would silently
+// reset the reader's range back to the default.
+func TestDashboard_SingleClusterRedirectKeepsWindow(t *testing.T) {
+	h, store := newTestHandler(t)
+	seedCluster(t, store)
+
+	w := httptest.NewRecorder()
+	h.Dashboard(w, httptest.NewRequest("GET", "/?days=30", nil))
+	if got, want := w.Header().Get("Location"), "/clusters/"+testClusterID+"?days=30"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+// With several clusters there is something to aggregate, so the overview
+// renders rather than redirecting.
+func TestDashboard_MultipleClustersRendersOverview(t *testing.T) {
+	h, store := newTestHandler(t)
+	seedCluster(t, store)
+	if err := store.UpsertCluster(context.Background(), storage.Cluster{
+		ID: "second", Name: "second", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertCluster: %v", err)
+	}
 
 	w := httptest.NewRecorder()
 	h.Dashboard(w, httptest.NewRequest("GET", "/", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), testClusterID) {
-		t.Errorf("expected body to contain cluster ID %q", testClusterID)
+	body := w.Body.String()
+	for _, want := range []string{testClusterID, "second", "Success rate"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("overview body missing %q", want)
+		}
 	}
 }
 

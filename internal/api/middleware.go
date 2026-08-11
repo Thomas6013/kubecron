@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
+
+	"github.com/kubecron/kubecron/internal/metrics"
 )
 
 // responseWriter wraps http.ResponseWriter to capture the HTTP status code.
@@ -40,6 +43,32 @@ func Logger(next http.Handler) http.Handler {
 			"status", rw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+	})
+}
+
+// Instrument records request counts and latency per matched route.
+//
+// The route label is the ServeMux pattern (for example
+// "GET /clusters/{clusterID}"), never r.URL.Path: paths embed cluster,
+// namespace, CronJob and run identifiers, so labelling by path would mint a new
+// time series per object and grow without bound. Requests that match no route
+// share a single "unmatched" label for the same reason — an unrouted path is
+// attacker-controlled.
+//
+// r.Pattern is only filled in once ServeMux has dispatched, so it is read after
+// the inner handler returns.
+func Instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := newResponseWriter(w)
+		next.ServeHTTP(rw, r)
+
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		metrics.HTTPRequestsTotal.WithLabelValues(route, r.Method, strconv.Itoa(rw.status)).Inc()
+		metrics.HTTPRequestDurationSeconds.WithLabelValues(route).Observe(time.Since(start).Seconds())
 	})
 }
 

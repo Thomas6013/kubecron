@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache-dependency-path: go.sum
@@ -30,8 +30,12 @@ jobs:
         env:
           CGO_ENABLED: "1"
 
+      # The v1 module path is a dead end: golangci-lint v2 lives at
+      # .../v2/cmd/golangci-lint, so `@latest` on the old path silently pinned
+      # CI to the final v1 release and it never picked up a new check again.
+      # Installing v2 explicitly keeps CI on the same semantics as .golangci.yml.
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
       - name: Run golangci-lint
         run: golangci-lint run

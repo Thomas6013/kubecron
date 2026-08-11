@@ -27,8 +27,9 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 - **Next-run countdown** — computed from the cron expression in the CronJob's own `spec.timeZone`, updated live in the browser; missed-run detection uses the same zone
 - **Suspend / Resume / Trigger** — control CronJobs directly from the UI without touching kubectl
 - **Multi-cluster** — one kubeconfig file per cluster in a directory; all clusters shown in a unified dashboard
+- **Focus rankings** — every view leads with success rate, failures, in-flight and suspended counts, then ranks CronJobs by most failures, longest mean duration, and highest peak CPU / memory over 24 h, 7 d or 30 d. Fleet-wide when you run several clusters, per-cluster on the cluster view
 - **OIDC authentication** — optional SSO via Keycloak, Dex, Google, or any OIDC provider
-- **Prometheus metrics** — `/metrics` endpoint for Grafana integration
+- **Prometheus metrics** — 16 metric families at `/metrics` for Grafana integration, including missed-schedule and in-flight-run gauges. Gauges are re-derived from the database every 30 s, so they keep reporting across a restart instead of going blank until each CronJob next fires
 
 ---
 
@@ -77,8 +78,25 @@ Key Helm values:
 | `config.logRetentionDays` | `14` | Days of raw log lines to keep (≤ `retentionDays`) |
 | `config.metricsSampleInterval` | `15` | Resource sampling interval (seconds) |
 | `persistence.size` | `500Mi` | PVC size for SQLite data |
-| `ingress.enabled` | `false` | Expose via Ingress |
+| `ingress.enabled` | `false` | Expose via Ingress — requires OIDC, see below |
 | `oidc.enabled` | `false` | Enable OIDC authentication |
+| `security.acknowledgeInsecureExposure` | `false` | Allow external exposure without OIDC (see below) |
+
+> ⚠️ **Exposing KubeCron requires authentication.**
+> KubeCron has no authentication of its own: with `oidc.enabled=false`, *every*
+> endpoint is anonymous — including `suspend`, `resume` and `trigger`, which act
+> on **every cluster whose kubeconfig is mounted**.
+>
+> The chart therefore **refuses to install** when the service is reachable from
+> outside the cluster (`ingress.enabled=true`, or `service.type` other than
+> `ClusterIP`) while OIDC is off. Either set `oidc.enabled=true`, or keep the
+> default ClusterIP and use `kubectl port-forward`.
+>
+> If authentication is genuinely enforced upstream — an authenticating proxy, a
+> service mesh, a VPN-only ingress — set
+> `security.acknowledgeInsecureExposure=true` to proceed deliberately.
+>
+> Note that `ingress.tls` is empty by default, so configure TLS as well.
 
 Full list of values: [`charts/kubecron/values.yaml`](charts/kubecron/values.yaml).
 

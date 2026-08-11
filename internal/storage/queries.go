@@ -829,6 +829,118 @@ func scanJobRun(r rowScanner) (*JobRun, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Fleet-wide aggregates (overview page)
+//
+// These read across every cluster at once, which no other query does — the rest
+// of the app is scoped to a cluster or a single CronJob. Both join `cronjobs`
+// so that runs belonging to a soft-deleted CronJob stay out of the totals: the
+// run rows survive deletion on purpose (history is preserved), so filtering on
+// job_runs alone would keep counting jobs that no longer exist.
+// ---------------------------------------------------------------------------
+
+// GetFleetStats aggregates inventory and run outcomes over the last `days`
+// days. An empty clusterID spans every cluster (the overview); a non-empty one
+// restricts the totals to that cluster (the cluster view), so both pages read
+// the same numbers through the same query.
+func (s *SQLiteStore) GetFleetStats(ctx context.Context, clusterID string, days int) (*FleetStats, error) {
+	var f FleetStats
+
+	// scope is appended to each WHERE clause; the placeholder is bound twice
+	// per statement so an empty clusterID matches every row.
+	const scope = ` AND (? = '' OR c.cluster_id = ?)`
+
+	// Inventory is a point-in-time count and ignores the window. Clusters is 1
+	// when scoped, since a scoped view describes exactly one cluster.
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM clusters WHERE deleted_at IS NULL AND (? = '' OR id = ?)),
+			(SELECT COUNT(DISTINCT c.namespace) FROM cronjobs c WHERE c.deleted_at IS NULL`+scope+`),
+			(SELECT COUNT(*) FROM cronjobs c WHERE c.deleted_at IS NULL`+scope+`),
+			(SELECT COUNT(*) FROM cronjobs c WHERE c.deleted_at IS NULL AND c.suspended = 1`+scope+`)`,
+		clusterID, clusterID, clusterID, clusterID, clusterID, clusterID, clusterID, clusterID,
+	).Scan(&f.Clusters, &f.Namespaces, &f.CronJobs, &f.Suspended)
+	if err != nil {
+		return nil, wrapErr("GetFleetStats inventory", err)
+	}
+
+	// Run outcomes over the window. Running runs are counted separately and are
+	// deliberately not bucketed as succeeded or failed — they have no outcome.
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN r.status = 'failed'    THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN r.status = 'running'   THEN 1 ELSE 0 END), 0),
+			COUNT(DISTINCT CASE WHEN r.status = 'failed' THEN r.cronjob_id END)
+		FROM job_runs r
+		JOIN cronjobs c ON c.id = r.cronjob_id
+		WHERE c.deleted_at IS NULL AND r.started_at > datetime('now', ?)`+scope,
+		fmt.Sprintf("-%d days", days), clusterID, clusterID,
+	).Scan(&f.Runs, &f.Succeeded, &f.Failed, &f.Running, &f.FailingCronJob)
+	if err != nil {
+		return nil, wrapErr("GetFleetStats runs", err)
+	}
+	return &f, nil
+}
+
+// rankValueExpr maps a RankMetric to the SQL aggregate that produces its value.
+// Ranking by peak rather than mean for CPU and memory is deliberate: what
+// decides a CronJob's resource limits is the worst run, not the typical one.
+// Duration ranks by mean, because a single slow outlier says less about where
+// wall-clock time actually goes than the run-in, run-out average does.
+var rankValueExpr = map[RankMetric]string{
+	RankByCPU:      `CAST(MAX(r.max_cpu_millicores) AS INTEGER)`,
+	RankByMemory:   `CAST(MAX(r.max_memory_bytes) AS INTEGER)`,
+	RankByDuration: `CAST(AVG(r.duration_ms) AS INTEGER)`,
+	RankByFailures: `COALESCE(SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END), 0)`,
+}
+
+// GetTopCronJobs returns the `limit` CronJobs that rank highest on `metric`
+// over the last `days` days. An empty clusterID ranks across every cluster;
+// a non-empty one ranks within it. Entries whose value is NULL (no samples
+// recorded) or zero are omitted rather than padding the list with rows that
+// carry no signal.
+func (s *SQLiteStore) GetTopCronJobs(ctx context.Context, clusterID string, metric RankMetric, days, limit int) ([]CronJobRank, error) {
+	valueExpr, ok := rankValueExpr[metric]
+	if !ok {
+		return nil, wrapErr("GetTopCronJobs", fmt.Errorf("unknown rank metric %q", metric))
+	}
+
+	// valueExpr comes from the closed rankValueExpr map above, never from a
+	// caller-supplied string, so this interpolation cannot carry injected SQL.
+	// clusterID stays a bound parameter.
+	query := fmt.Sprintf(`
+		SELECT c.id, c.cluster_id, c.namespace, c.name,
+		       COUNT(*) AS runs,
+		       COALESCE(SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+		       %s AS value
+		FROM job_runs r
+		JOIN cronjobs c ON c.id = r.cronjob_id
+		WHERE c.deleted_at IS NULL AND r.started_at > datetime('now', ?)
+		  AND (? = '' OR c.cluster_id = ?)
+		GROUP BY c.id, c.cluster_id, c.namespace, c.name
+		HAVING value IS NOT NULL AND value > 0
+		ORDER BY value DESC
+		LIMIT ?`, valueExpr)
+
+	rows, err := s.db.QueryContext(ctx, query, fmt.Sprintf("-%d days", days), clusterID, clusterID, limit)
+	if err != nil {
+		return nil, wrapErr("GetTopCronJobs", err)
+	}
+	defer rows.Close()
+
+	var out []CronJobRank
+	for rows.Next() {
+		var r CronJobRank
+		if err := rows.Scan(&r.CronJobID, &r.ClusterID, &r.Namespace, &r.Name, &r.Runs, &r.Failed, &r.Value); err != nil {
+			return nil, wrapErr("GetTopCronJobs scan", err)
+		}
+		out = append(out, r)
+	}
+	return out, wrapErr("GetTopCronJobs rows", rows.Err())
+}
+
+// ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
 

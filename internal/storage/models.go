@@ -104,3 +104,55 @@ type DailyRunStat struct {
 	Succeeded int    `json:"succeeded"`
 	Running   int    `json:"running"`
 }
+
+// FleetStats aggregates the whole fleet — every cluster, every namespace — over
+// a rolling window. It answers "is anything on fire right now" in one query set,
+// which is what the overview page leads with.
+type FleetStats struct {
+	Clusters       int `json:"clusters"`
+	Namespaces     int `json:"namespaces"`
+	CronJobs       int `json:"cronjobs"`
+	Suspended      int `json:"suspended"`
+	Runs           int `json:"runs"`
+	Succeeded      int `json:"succeeded"`
+	Failed         int `json:"failed"`
+	Running        int `json:"running"`
+	FailingCronJob int `json:"failing_cronjobs"` // distinct CronJobs with >=1 failure in the window
+}
+
+// SuccessRate returns the share of finished runs that succeeded, in percent.
+// Running runs are excluded: they have no outcome yet, and counting them as
+// failures would make every busy window look like a partial outage.
+func (f FleetStats) SuccessRate() float64 {
+	finished := f.Succeeded + f.Failed
+	if finished == 0 {
+		return 0
+	}
+	return float64(f.Succeeded) / float64(finished) * 100
+}
+
+// RankMetric names a column the fleet-wide top-N ranking can order by. The set
+// is closed because the value it selects is interpolated into the SQL text —
+// callers pass a RankMetric, never a raw string, so no caller-controlled data
+// reaches the query.
+type RankMetric string
+
+const (
+	RankByCPU      RankMetric = "cpu"      // peak CPU millicores observed
+	RankByMemory   RankMetric = "memory"   // peak memory bytes observed
+	RankByDuration RankMetric = "duration" // mean wall-clock run duration
+	RankByFailures RankMetric = "failures" // number of failed runs
+)
+
+// CronJobRank is one entry in a fleet-wide top-N list. Value carries the metric
+// the list was ranked by, in the unit that metric implies (millicores, bytes,
+// milliseconds, or a plain count for failures).
+type CronJobRank struct {
+	CronJobID string `json:"cronjob_id"`
+	ClusterID string `json:"cluster_id"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Runs      int    `json:"runs"`
+	Failed    int    `json:"failed"`
+	Value     int64  `json:"value"`
+}

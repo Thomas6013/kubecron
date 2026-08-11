@@ -269,6 +269,155 @@ mark.log-hl { background: rgba(236,201,75,0.35); color: var(--yellow); border-ra
 }
 #toast.show { opacity: 1; }
 
+/* ── Nav: overview link + cluster control ───────────────────────────────────── */
+.nav-link { color: var(--muted); font-size: 13px; }
+.nav-link.active { color: var(--text); }
+
+/* Single-cluster installs get a label rather than a one-option dropdown. */
+.nav-cluster {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 10px;
+}
+.nav-cluster:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+.nav-cluster.active { color: var(--accent); border-color: var(--accent); background: rgba(108,142,247,0.12); }
+
+.nav-cluster-select {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.nav-cluster-select:hover { border-color: var(--accent); }
+
+/* ── Section headings ───────────────────────────────────────────────────────── */
+.section-heading {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 28px 0 12px;
+}
+
+/* ── Overview: stat tiles ───────────────────────────────────────────────────── */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.stat-tile-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.stat-tile-value {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.stat-tile-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+/* ── Overview: range switch ─────────────────────────────────────────────────── */
+.range-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.range-opt {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 12px;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+}
+.range-opt:last-child { border-right: none; }
+.range-opt:hover { background: var(--surface2); color: var(--text); opacity: 1; }
+.range-opt.active { background: rgba(108,142,247,0.15); color: var(--accent); }
+
+/* ── Overview: top-N lists ──────────────────────────────────────────────────── */
+/* Two columns rather than auto-fill: four narrow panels squeeze the CronJob
+   names, and align-items:start stops a sparse ranking from being stretched to
+   the height of a full one. */
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+.top-list { padding: 16px 18px; }
+.top-list-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 14px;
+}
+.top-list-title {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.top-list-hint { font-size: 11px; color: var(--muted); }
+.top-list-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  padding: 14px 0;
+  text-align: center;
+}
+.top-list-body { display: flex; flex-direction: column; gap: 12px; }
+.top-row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.top-row-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-row-name:hover { color: var(--accent); opacity: 1; }
+.top-row-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.top-row-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  color: var(--muted);
+  margin: 3px 0 5px;
+  gap: 10px;
+}
+.top-row-loc { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-row-runs { flex-shrink: 0; }
+.top-bar { height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.top-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+
 /* ── Mobile ───────────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .container, .page-content { padding: 12px 14px; }
@@ -299,7 +448,8 @@ mark.log-hl { background: rgba(236,201,75,0.35); color: var(--yellow); border-ra
   .card [style*="flex-wrap:wrap"] { gap: 0.5rem 1rem; }
 
   /* Grids collapse to 1 column */
-  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .grid-2, .grid-3, .overview-grid { grid-template-columns: 1fr; }
+  .stat-row { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 
   /* Nav */
   nav { padding: 0 14px; gap: 14px; }

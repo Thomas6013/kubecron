@@ -63,11 +63,27 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+security:
+  # KubeCron has no authentication of its own. With oidc.enabled=false every
+  # endpoint is anonymous, including suspend/resume/trigger, which act on every
+  # cluster whose kubeconfig is mounted.
+  #
+  # The chart therefore refuses to install when the service is reachable from
+  # outside the cluster (ingress.enabled=true, or service.type other than
+  # ClusterIP) while oidc.enabled is false. Set this to true only when the
+  # network is trusted and authentication is enforced upstream — an
+  # authenticating proxy, a service mesh, or a VPN-only ingress. See SEC-28 in
+  # docs/AUDIT.md.
+  acknowledgeInsecureExposure: false
+
 service:
+  # Anything other than ClusterIP reaches outside the cluster and requires
+  # either oidc.enabled=true or security.acknowledgeInsecureExposure=true.
   type: ClusterIP
   port: 80
 
 ingress:
+  # Requires oidc.enabled=true, or security.acknowledgeInsecureExposure=true.
   enabled: false
   className: ""
   annotations: {}

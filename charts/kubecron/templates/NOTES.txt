@@ -1,4 +1,22 @@
 KubeCron has been deployed.
+{{- if not .Values.oidc.enabled }}
+
+  ⚠️  AUTHENTICATION IS DISABLED (oidc.enabled=false)
+
+  Every endpoint is anonymous — including suspend, resume and trigger, which
+  act on every cluster whose kubeconfig is mounted. Anyone who can reach this
+  service can suspend your CronJobs.
+{{- if .Values.security.acknowledgeInsecureExposure }}
+
+  The service is reachable from outside the cluster and you have set
+  security.acknowledgeInsecureExposure=true. Make sure authentication really is
+  enforced upstream (authenticating proxy, service mesh, or VPN-only ingress).
+{{- else }}
+
+  It is currently only reachable inside the cluster. Before exposing it, set
+  oidc.enabled=true.
+{{- end }}
+{{- end }}
 
   URL:
   {{- if .Values.ingress.enabled }}

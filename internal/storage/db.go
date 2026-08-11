@@ -41,6 +41,12 @@ type Store interface {
 	GetRunStats7d(ctx context.Context, cronjobID string) (*RunStats, error)
 	GetRecentDurations(ctx context.Context, cronjobID string, limit int) ([]int64, error)
 	GetDailyRunStats(ctx context.Context, cronjobID string, days int) ([]DailyRunStat, error)
+
+	// Fleet aggregates backing the overview and the cluster view. An empty
+	// clusterID spans every cluster; a non-empty one scopes to that cluster,
+	// so both views are rendered by the same code against the same queries.
+	GetFleetStats(ctx context.Context, clusterID string, days int) (*FleetStats, error)
+	GetTopCronJobs(ctx context.Context, clusterID string, metric RankMetric, days, limit int) ([]CronJobRank, error)
 	UpdateJobRunStatus(ctx context.Context, id, status string, finishedAt *time.Time, exitCode, retryCount int) error
 	UpdateJobRunNode(ctx context.Context, id, nodeName, containerImage string) error
 	GetRunningRuns(ctx context.Context) ([]JobRun, error)
