@@ -17,10 +17,11 @@ import (
 	"github.com/kubecron/kubecron/internal/api"
 	"github.com/kubecron/kubecron/internal/auth"
 	"github.com/kubecron/kubecron/internal/cluster"
-	_ "github.com/kubecron/kubecron/internal/metrics" // register Prometheus collectors
+	"github.com/kubecron/kubecron/internal/metrics"
 	"github.com/kubecron/kubecron/internal/sampler"
 	"github.com/kubecron/kubecron/internal/storage"
 	"github.com/kubecron/kubecron/internal/streamer"
+	"github.com/kubecron/kubecron/internal/version"
 	"github.com/kubecron/kubecron/internal/watcher"
 )
 
@@ -127,7 +128,14 @@ func main() {
 		slog.Info("OIDC authentication enabled", "issuer", cfg.OIDC.IssuerURL)
 	}
 
-	// 10. HTTP server.
+	// 10. Prometheus state collector. Republishes the gauge-valued metrics from
+	// stored state on a ticker so that they survive a restart: the watcher
+	// wiring alone only reacts to live events, leaving run-outcome gauges with
+	// no series at all until each CronJob next fires.
+	metrics.SetBuildInfo(version.Version)
+	go metrics.NewStateCollector(store, metrics.DefaultCollectInterval).Run(ctx)
+
+	// 11. HTTP server.
 	srv := api.NewServer(store, mgr.Registry(), broadcaster, cacheSynced, authenticator)
 
 	go func() {

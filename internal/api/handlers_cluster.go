@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,9 @@ func (h *Handler) ListClusters(w http.ResponseWriter, r *http.Request) {
 
 // ── UI — Dashboard ────────────────────────────────────────────────────────────
 
+// topListSize is how many CronJobs each overview ranking shows.
+const topListSize = 5
+
 func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -71,10 +75,18 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		cards = append(cards, card{c, len(cjs), runningByCluster[c.ID]})
 	}
 
+	days := normalizeWindow(atoiDefault(r.URL.Query().Get("days"), 7))
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHead("Dashboard", auth.EmailFromContext(ctx)))
+	fmt.Fprint(w, htmlHead("Dashboard", h.nav(ctx, "")))
 	fmt.Fprint(w, `<div class="container">`)
-	fmt.Fprint(w, `<h1 style="font-family:var(--font-mono);color:var(--accent);margin-bottom:1.5rem;">[KubeCron]</h1>`)
+	fmt.Fprintf(w, `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;">
+  <h1 style="font-family:var(--font-mono);color:var(--accent);">[KubeCron]</h1>%s
+</div>`, rangeSwitchFor("/", days))
+
+	h.renderOverview(ctx, w, "", days)
+
+	fmt.Fprint(w, sectionHeading("Clusters"))
 
 	if len(cards) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">
@@ -114,6 +126,112 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, htmlFoot)
 }
 
+// renderOverview writes the summary block: KPI tiles followed by the four
+// rankings. An empty clusterID summarises the whole fleet (the overview page);
+// a non-empty one summarises that cluster (the cluster page), so the two views
+// stay consistent by construction rather than by convention.
+//
+// It is best-effort by design — a failing aggregate must degrade to a missing
+// panel rather than take down the CronJob list underneath it, which is the
+// app's primary navigation.
+func (h *Handler) renderOverview(ctx context.Context, w http.ResponseWriter, clusterID string, days int) {
+	stats, err := h.store.GetFleetStats(ctx, clusterID, days)
+	if err != nil {
+		slog.Error("overview: failed to load stats", "cluster", clusterID, "days", days, "err", err)
+		return
+	}
+
+	suspendedTone := ""
+	if stats.Suspended > 0 {
+		suspendedTone = "yellow"
+	}
+	failedTone := "green"
+	if stats.Failed > 0 {
+		failedTone = "red"
+	}
+	rateTone := "green"
+	switch {
+	case stats.Succeeded+stats.Failed == 0:
+		rateTone = ""
+	case stats.SuccessRate() < 90:
+		rateTone = "red"
+	case stats.SuccessRate() < 99:
+		rateTone = "yellow"
+	}
+
+	rate := "—"
+	if stats.Succeeded+stats.Failed > 0 {
+		rate = fmt.Sprintf("%.1f%%", stats.SuccessRate())
+	}
+
+	// The CronJob count is point-in-time inventory and ignores the window, so
+	// its subtitle must not imply otherwise. It reports breadth instead:
+	// clusters on the fleet overview, namespaces once scoped to one cluster.
+	scopeSub := fmt.Sprintf("across %d cluster(s)", stats.Clusters)
+	if clusterID != "" {
+		scopeSub = fmt.Sprintf("in %d namespace(s)", stats.Namespaces)
+	}
+
+	fmt.Fprint(w, `<div class="stat-row">`)
+	fmt.Fprint(w, statTile("CronJobs", strconv.Itoa(stats.CronJobs), scopeSub, ""))
+	fmt.Fprint(w, statTile("Success rate", rate,
+		fmt.Sprintf("%d finished run(s)", stats.Succeeded+stats.Failed), rateTone))
+	fmt.Fprint(w, statTile("Failed", strconv.Itoa(stats.Failed),
+		fmt.Sprintf("in %d cronjob(s)", stats.FailingCronJob), failedTone))
+	fmt.Fprint(w, statTile("Running", strconv.Itoa(stats.Running), "right now", "running"))
+	fmt.Fprint(w, statTile("Suspended", strconv.Itoa(stats.Suspended), "not scheduled", suspendedTone))
+	fmt.Fprint(w, `</div>`)
+
+	// Each ranking is fetched independently so that one failing panel does not
+	// blank the others.
+	top := func(metric storage.RankMetric) []storage.CronJobRank {
+		ranks, err := h.store.GetTopCronJobs(ctx, clusterID, metric, days, topListSize)
+		if err != nil {
+			slog.Error("overview: failed to rank cronjobs",
+				"cluster", clusterID, "metric", metric, "days", days, "err", err)
+			return nil
+		}
+		return ranks
+	}
+
+	fmt.Fprint(w, `<div class="overview-grid">`)
+	fmt.Fprint(w, topList("Most failures", "failed runs",
+		top(storage.RankByFailures), func(v int64) string { return strconv.FormatInt(v, 10) }))
+	fmt.Fprint(w, topList("Longest running", "mean duration",
+		top(storage.RankByDuration), fmtDuration))
+	fmt.Fprint(w, topList("Top CPU", "peak observed",
+		top(storage.RankByCPU), fmtMillicores))
+	fmt.Fprint(w, topList("Top memory", "peak observed",
+		top(storage.RankByMemory), fmtBytes))
+	fmt.Fprint(w, `</div>`)
+}
+
+// nav assembles the nav state for a page belonging to activeCluster (empty on
+// the overview). A failure to list clusters degrades to a nav without the
+// cluster control rather than failing the page: navigation chrome must not be
+// able to take down the content it wraps.
+func (h *Handler) nav(ctx context.Context, activeCluster string) navState {
+	clusters, err := h.store.ListClusters(ctx)
+	if err != nil {
+		slog.Error("nav: failed to list clusters", "err", err)
+		clusters = nil
+	}
+	return navState{
+		UserEmail:     auth.EmailFromContext(ctx),
+		Clusters:      clusters,
+		ActiveCluster: activeCluster,
+	}
+}
+
+// atoiDefault parses s, falling back to def when it is empty or malformed.
+func atoiDefault(s string, def int) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
 // ── UI — Cluster detail (CronJobs grouped by namespace) ──────────────────────
 
 func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
@@ -146,12 +264,20 @@ func (h *Handler) ClusterDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, cronjobs, ""), auth.EmailFromContext(ctx)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, cronjobs, ""), h.nav(ctx, clusterID)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
 		`<span>`+esc(clusterID)+`</span>`,
 	))
+
+	// The same summary block as the overview, scoped to this cluster: the
+	// cluster view answers "where do I focus *here*" before listing every row.
+	days := normalizeWindow(atoiDefault(r.URL.Query().Get("days"), 7))
+	fmt.Fprintf(w, `<div style="display:flex;justify-content:flex-end;margin-bottom:12px;">%s</div>`,
+		rangeSwitchFor("/clusters/"+url.PathEscape(clusterID), days))
+	h.renderOverview(ctx, w, clusterID, days)
+	fmt.Fprint(w, sectionHeading("CronJobs"))
 
 	if len(groups) == 0 {
 		fmt.Fprint(w, `<div class="card" style="text-align:center;padding:3rem;color:var(--muted);font-family:var(--font-mono);">No CronJobs found in this cluster.</div>`)
@@ -200,7 +326,7 @@ func (h *Handler) NamespaceDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCronJobs, ns), auth.EmailFromContext(ctx)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCronJobs, ns), h.nav(ctx, clusterID)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
@@ -347,16 +473,17 @@ func buildCronJobRow(clusterID string, cj storage.CronJob, sum *storage.CronJobS
 		row.ScheduleError = true
 	}
 
-	if !cj.Suspended {
-		if prev, err := schedule.PrevRun(cj.Schedule, tz, now); err == nil {
-			if now.Sub(prev) > 5*time.Minute {
-				if row.LastRun == nil || (row.LastRun.Status != "running" && row.LastRun.StartedAt.Before(prev)) {
-					row.IsMissed = true
-				}
-			}
-		}
-	}
+	row.IsMissed = schedule.IsMissed(cj.Schedule, tz, cj.Suspended, lastRunForSchedule(row.LastRun), now)
 	return row
+}
+
+// lastRunForSchedule adapts a stored run to the value schedule.IsMissed takes,
+// returning nil when the CronJob has never run.
+func lastRunForSchedule(r *storage.JobRun) *schedule.LastRun {
+	if r == nil {
+		return nil
+	}
+	return &schedule.LastRun{StartedAt: r.StartedAt, Running: r.Status == "running"}
 }
 
 // cronJobRowInputs fetches everything the CronJob rows of one cluster need:

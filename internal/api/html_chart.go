@@ -124,10 +124,10 @@ func heatmapHTML(stats []storage.DailyRunStat, days int) string {
 				color = "#4299e1"
 				tooltip = fmt.Sprintf("%s: %d running, %d/%d ok", dayStr, stat.Running, stat.Succeeded, stat.Total-stat.Running)
 			} else {
-				switch {
-				case stat.Succeeded == stat.Total:
+				switch stat.Succeeded {
+				case stat.Total:
 					color = "var(--green)"
-				case stat.Succeeded == 0:
+				case 0:
 					color = "var(--red)"
 				default:
 					color = "var(--yellow)"

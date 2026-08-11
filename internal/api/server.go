@@ -102,7 +102,7 @@ func (s *Server) Start(port int) error {
 
 	// Build middleware chain; prepend OIDC middleware if enabled.
 	secureCookies := s.authenticator != nil && s.authenticator.Secure()
-	middlewares := []func(http.Handler) http.Handler{Logger, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
+	middlewares := []func(http.Handler) http.Handler{Logger, Instrument, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
 	if s.authenticator != nil {
 		middlewares = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, middlewares...)
 	}

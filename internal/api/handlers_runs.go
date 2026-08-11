@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/kubecron/kubecron/internal/auth"
 	"github.com/kubecron/kubecron/internal/storage"
 )
 
@@ -39,8 +38,8 @@ func (h *Handler) ListRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 type resourceSamplesResponse struct {
-	RunID   string      `json:"run_id"`
-	Samples any `json:"samples"`
+	RunID   string `json:"run_id"`
+	Samples any    `json:"samples"`
 }
 
 func (h *Handler) GetResourceSamples(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +94,7 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), auth.EmailFromContext(ctx)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), h.nav(ctx, clusterID)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
@@ -224,7 +223,7 @@ func (h *Handler) RunDetail(w http.ResponseWriter, r *http.Request) {
 	allCJs, _ := h.store.ListCronJobs(ctx, clusterID)
 	runsURL := "/clusters/" + esc(clusterID) + "/cronjobs/" + esc(ns) + "/" + esc(name) + "/runs"
 
-	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), auth.EmailFromContext(ctx)))
+	fmt.Fprint(w, htmlHeadSidebar(clusterID, buildNsSidebar(clusterID, allCJs, ns), h.nav(ctx, clusterID)))
 	fmt.Fprint(w, `<div class="page-content">`)
 	fmt.Fprint(w, breadcrumb(
 		`<a href="/">clusters</a>`,
