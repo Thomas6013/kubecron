@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kubecron/kubecron/internal/storage"
@@ -83,7 +84,7 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 	if day != "" {
 		runs, err = h.store.ListJobRunsByDay(ctx, cj.ID, day)
 	} else {
-		runs, err = h.store.ListJobRunsPaged(ctx, cj.ID, "", runsPageSize)
+		runs, err = h.store.ListJobRunsPaged(ctx, cj.ID, time.Time{}, runsPageSize)
 	}
 	if err != nil {
 		http.Error(w, "failed to load runs", http.StatusInternalServerError)
@@ -142,7 +143,7 @@ func (h *Handler) RunsList(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprint(w, `</tbody></table></div>`)
 		if day == "" && len(runs) == runsPageSize {
-			cursor := runs[len(runs)-1].StartedAt.UTC().Format(time.RFC3339)
+			cursor := runCursor(runs[len(runs)-1])
 			fmt.Fprint(w, runLoadMoreWrap(clusterID, ns, name, cursor, ""))
 		} else {
 			fmt.Fprint(w, `<div id="load-more-wrap"></div>`)
@@ -159,7 +160,7 @@ func (h *Handler) RunsListMore(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("ns")
 	name := r.PathValue("name")
 	ctx := r.Context()
-	before := r.URL.Query().Get("before")
+	before := parseRunCursor(r.URL.Query().Get("before"))
 	day := r.URL.Query().Get("day")
 
 	cj, err := h.store.GetCronJobByName(ctx, clusterID, ns, name)
@@ -185,7 +186,7 @@ func (h *Handler) RunsListMore(w http.ResponseWriter, r *http.Request) {
 	}
 	// OOB: update or clear the load-more button.
 	if day == "" && len(runs) == runsPageSize {
-		cursor := runs[len(runs)-1].StartedAt.UTC().Format(time.RFC3339)
+		cursor := runCursor(runs[len(runs)-1])
 		fmt.Fprint(w, runLoadMoreOOB(clusterID, ns, name, cursor, ""))
 	} else {
 		fmt.Fprint(w, runLoadMoreOOB(clusterID, ns, name, "", ""))
@@ -419,6 +420,47 @@ func (h *Handler) DownloadLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
+
+// runCursor renders a run's start time as the opaque `before` cursor of the
+// next page.
+//
+// Full nanosecond precision, not RFC3339's whole seconds: the cursor selects
+// runs strictly older than it, so truncating to a second silently skips every
+// other run that started in the same second as the last row of the page — which
+// for a per-minute CronJob with parallel pods is a real loss, not a theoretical
+// one.
+func runCursor(last storage.JobRun) string {
+	return last.StartedAt.Format(time.RFC3339Nano)
+}
+
+// parseRunCursor turns a `before` query parameter back into a time.
+//
+// The cursor keeps the offset of the run it came from rather than being
+// converted to UTC, and that is load-bearing: the comparison it feeds is a
+// textual one against a column that stores the zone alongside the instant, so a
+// cursor in a different zone from the rows would compare wrong on a tie. Parsed
+// back here, a "+02:00" offset that matches the process's own zone is resolved
+// to that zone, which is where the rows were written.
+//
+// An absent or unparseable cursor yields the zero time, which means "start at
+// the newest run": the value is opaque to the caller, so re-serving the first
+// page is more useful than an error they could not act on.
+func parseRunCursor(raw string) time.Time {
+	if raw == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t
+	}
+	// A "+" in a query string decodes to a space, so a client that pasted the
+	// cursor in without escaping it arrives here with "…00.5 02:00". Undoing
+	// that is cheap and saves a cross-repo consumer a silent reset to page one
+	// on every cursor east of Greenwich.
+	if t, err := time.Parse(time.RFC3339Nano, strings.Replace(raw, " ", "+", 1)); err == nil {
+		return t
+	}
+	return time.Time{}
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
