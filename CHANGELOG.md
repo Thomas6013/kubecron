@@ -10,6 +10,126 @@ _Nothing yet._
 
 ---
 
+## [0.4.0] - 2026-08-21
+
+The "two shapes" release: KubeCron keeps its dashboard and gains a headless
+collector mode, so the same binary can be the product an operator opens **or**
+the recorder a console reads.
+
+### Added
+
+- **`KUBECRON_MODE`** selects the HTTP surface. `ui` (the default, and what
+  every existing deployment keeps) serves the dashboard, the JSON API behind it
+  and the CronJob controls. `server` serves only the read-only `/api/v1`
+  contract — no HTML, no static assets, no suspend/resume/trigger. `standalone`
+  and `collector` are accepted as aliases.
+
+  Collection is identical in both: the same informers, the same 15-second
+  resource sampler, the same log capture and retention. Only the routes differ,
+  which is why this is a flag and not a build tag — a collector that recorded a
+  different set of facts from the standalone product would be a second product
+  to keep correct. A release can be switched between modes and keeps its
+  history.
+
+- **The `/api/v1` collector contract**, documented in `docs/COLLECTOR-API.md`
+  and served in *both* modes, so a console can read a KubeCron that is already
+  running rather than needing a second one deployed beside it.
+
+  `GET /api/v1/collector` (discovery), `/clusters`,
+  `/clusters/{id}/cronjobs`, `…/cronjobs/{ns}/{name}/runs` (paged),
+  `…/cronjobs/{ns}/{name}/daily` (heatmap), `/runs/{id}`, `/runs/{id}/samples`,
+  `/runs/{id}/logs`, `/runs/{id}/logs.txt`, `/runs/{id}/stream`.
+
+  Every shape carries what it takes to tell absence from fact: `observed_since`
+  (the collector was not installed yet) rather than a silent gap, `expired` plus
+  `log_size_bytes` (the body aged out) rather than a run that appears to have
+  printed nothing, `metrics_enabled` and `interval_seconds` rather than a run
+  that appears to have used no CPU. There is no backfill, and the API says so
+  rather than implying otherwise.
+
+  Discovery is a first-class endpoint because the consumer is expected to
+  degrade: a client meeting a version it does not know must fall back to another
+  source, not fail. Unmatched `/api/v1/` paths return a JSON 404 naming the
+  contract version instead of an HTML error page.
+
+- **`API_TOKEN`** — a bearer-token front door for server mode. OIDC is a browser
+  redirect flow that a program cannot complete, so a collector uses a shared
+  secret instead. `/healthz` and `/readyz` stay open for the kubelet; `/metrics`
+  does not, because with no dashboard in front of it the exporter would
+  otherwise publish the whole CronJob inventory anonymously (AUDIT SEC-29).
+
+- **`CLUSTER_ID`** names the cluster when KubeCron watches itself through its own
+  ServiceAccount — the one-collector-per-cluster shape, where there is no
+  kubeconfig filename to take a name from. Defaults to `local`, which is what
+  existing in-cluster deployments already key their rows on.
+
+- **Chart support for both shapes.** `mode: server` grants read-only RBAC only
+  (no `patch` on cronjobs, no `create` on jobs — so the read-only claim is
+  checkable from outside the process), labels the Service
+  `kubecron.io/collector=true` with the API version, path and auth scheme as
+  annotations so a console can find it instead of being configured with a URL
+  per cluster, and creates the API-token Secret. `values.yaml` gains `mode`,
+  `api.token` / `api.existingSecret`, `clusterID` and `service.discoverable`.
+  An unrecognised `mode` fails the install rather than silently rendering a
+  full UI.
+
+### Fixed
+
+- **Missed-run detection was silently switched off for every schedule sparser
+  than daily.** `schedule.PrevRun` scanned back a fixed 25 hours to find the most
+  recent due time, and a weekly CronJob has no occurrence in that window on six
+  days out of seven — a monthly one on twenty-nine days out of thirty. It
+  returned an error, `IsMissed` read that as "cannot say", and answered `false`.
+
+  The failure was invisible because it was silent in both directions: a healthy
+  monthly job and one that had not fired in seventy days produced the same
+  verdict. The nightly-weekly backup and the monthly invoice run — the jobs where
+  a missed run matters most — were exactly the ones never checked. This fed the
+  UI badge, the `/api/v1` `missed` field and the `kubecron_cronjob_missed` gauge
+  alike, since all three share the one function (MAINT-2).
+
+  The search window is now derived from the schedule's own cadence and expanded
+  until an occurrence is found, capped at 400 days. That also makes the dense
+  case cheaper rather than more expensive: a per-minute schedule costs ~3
+  `Next()` calls instead of ~1 500, paid once per CronJob row on every cluster
+  and namespace render.
+
+  Second half of the same bug: when the most recent due time falls inside
+  `MissedGracePeriod` it cannot be judged yet, and `IsMissed` answered `false`
+  outright. A per-minute CronJob is inside *some* occurrence's grace period at
+  every instant, so one could never be reported missed at all; an hourly job
+  asked exactly on the hour reported healthy however long it had been silent. It
+  now steps back to the previous occurrence — but **only when a run exists to
+  compare against**, because with none the earlier occurrence may predate the
+  CronJob itself, and a job created three minutes ago must not be flagged for a
+  tick from before it existed.
+
+  Found while porting this package into KubeDeck. The two implementations were
+  then run against the same 13 scenarios and agree on all of them.
+
+- **Run history paging returned nothing past the first page**, in the UI's
+  "Load more" as well as over the API. The driver stores a `time.Time` in Go's
+  own `time.Time.String()` layout, which is not ISO 8601, so SQLite's
+  `datetime()` yielded NULL for it and the `datetime(started_at) < datetime(?)`
+  predicate was NULL for every row. Nothing failed loudly — the history simply
+  appeared to stop at 50 runs. `ListJobRunsPaged` now takes a `time.Time` and
+  compares directly, which is the same lexicographic property the `ORDER BY` on
+  that column already relied on.
+
+  The cursor also carried only whole seconds, which would have skipped runs
+  starting in the same second as a page's last row — parallel pods of one
+  CronJob start milliseconds apart. It now carries full precision.
+
+### Security
+
+- `security.acknowledgeInsecureExposure` (SEC-28) now understands both modes.
+  An externally-reachable `mode: server` release with no `api.token` is refused
+  just as a `mode: ui` release with `oidc.enabled=false` is — with a message
+  that states the difference: server mode cannot be made to mutate anything, but
+  it discloses the entire recorded history.
+
+---
+
 ## [0.3.0] - 2026-08-11
 
 The "know where to look" release: a summary that ranks what actually needs

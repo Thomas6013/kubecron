@@ -6,6 +6,14 @@ metadata:
   labels:
     {{- include "kubecron.labels" . | nindent 4 }}
 rules:
+{{- if eq (include "kubecron.mode" .) "server" }}
+{{- /* Collector mode registers no mutating route, so it is granted no mutating
+       verb: read-only in the API surface and read-only in RBAC, which is what
+       makes the first claim checkable from outside the process. */}}
+- apiGroups: ["batch"]
+  resources: ["cronjobs", "jobs"]
+  verbs: ["get", "list", "watch"]
+{{- else }}
 # patch: suspend/resume — no create on cronjobs.
 - apiGroups: ["batch"]
   resources: ["cronjobs"]
@@ -14,6 +22,7 @@ rules:
 - apiGroups: ["batch"]
   resources: ["jobs"]
   verbs: ["get", "list", "watch", "create"]
+{{- end }}
 - apiGroups: [""]
   resources: ["pods", "pods/log"]
   verbs: ["get", "list", "watch"]

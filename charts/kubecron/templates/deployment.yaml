@@ -56,6 +56,8 @@ spec:
           containerPort: {{ .Values.config.port }}
           protocol: TCP
         env:
+        - name: KUBECRON_MODE
+          value: {{ include "kubecron.mode" . | quote }}
         - name: PORT
           value: {{ .Values.config.port | quote }}
         - name: DB_PATH
@@ -68,7 +70,21 @@ spec:
           value: {{ .Values.config.logRetentionDays | quote }}
         - name: METRICS_SAMPLE_INTERVAL
           value: {{ .Values.config.metricsSampleInterval | quote }}
-        {{- if .Values.oidc.enabled }}
+        {{- if eq (include "kubecron.mode" .) "server" }}
+        {{- /* Names the cluster when the pod watches itself through its own
+               ServiceAccount, which is the shape a per-cluster collector runs
+               in. Ignored when kubeconfigs are mounted: those name themselves. */}}
+        - name: CLUSTER_ID
+          value: {{ .Values.clusterID | quote }}
+        {{- if include "kubecron.apiTokenSecretName" . }}
+        - name: API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "kubecron.apiTokenSecretName" . }}
+              key: api-token
+        {{- end }}
+        {{- end }}
+        {{- if and .Values.oidc.enabled (eq (include "kubecron.mode" .) "ui") }}
         - name: OIDC_ENABLED
           value: "true"
         - name: OIDC_ISSUER_URL

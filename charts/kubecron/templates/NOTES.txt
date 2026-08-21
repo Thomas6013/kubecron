@@ -1,3 +1,53 @@
+{{- $mode := include "kubecron.mode" . -}}
+{{- $token := include "kubecron.apiTokenSecretName" . -}}
+{{- if eq $mode "server" }}
+KubeCron has been deployed in SERVER (collector) mode.
+
+  It serves no dashboard. It records CronJob runs — outcomes, exit codes,
+  15-second CPU/memory samples and the log body of each run — and answers the
+  read-only API a console reads:
+
+    GET /api/v1/collector    what this collector holds and can answer
+    GET /api/v1/clusters
+    GET /api/v1/clusters/{cluster}/cronjobs
+    GET /api/v1/clusters/{cluster}/cronjobs/{ns}/{name}/runs
+    GET /api/v1/runs/{id}/logs
+
+  It records from now on. There is no backfill: runs that happened before this
+  install were never observed by anything, and the API reports the moment it
+  started watching so a console can draw that period as unwatched rather than
+  as an absence of runs.
+{{- if not $token }}
+
+  ⚠️  NO API TOKEN (api.token is empty)
+
+  Every /api/v1 route and /metrics answers anonymously. There are no mutating
+  endpoints, so nobody can suspend or trigger anything — but anyone who can
+  reach this Service can read your whole CronJob inventory, every run outcome
+  and every captured log body.
+
+  Generate one with:  openssl rand -hex 32
+{{- end }}
+
+  Reach it with:
+  {{- if .Values.ingress.enabled }}
+    https://{{ .Values.ingress.host }}/api/v1/collector
+  {{- else }}
+    kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubecron.fullname" . }} 8080:{{ .Values.service.port }}
+    curl {{ if $token }}-H "Authorization: Bearer $TOKEN" {{ end }}http://localhost:8080/api/v1/collector
+  {{- end }}
+  {{- if and .Values.service.discoverable (eq .Values.service.type "ClusterIP") }}
+
+  The Service carries kubecron.io/collector=true, so a console can find it
+  without being configured with a URL.
+  {{- end }}
+
+  This cluster reports as: {{ .Values.clusterID }}
+  {{- if or .Values.kubeconfigs.existingSecret .Values.kubeconfigs.data }}
+  (overridden per mounted kubeconfig — clusterID applies only when the pod
+  watches itself through its own ServiceAccount)
+  {{- end }}
+{{- else }}
 KubeCron has been deployed.
 {{- if not .Values.oidc.enabled }}
 
@@ -27,8 +77,10 @@ KubeCron has been deployed.
     kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "kubecron.fullname" . }} 8080:{{ .Values.service.port }}
     then open http://localhost:8080
   {{- end }}
+{{- end }}
 
-  Run history is kept for {{ .Values.config.retentionDays }} day(s) (config.retentionDays).
+  Run history is kept for {{ .Values.config.retentionDays }} day(s) (config.retentionDays);
+  log bodies for {{ .Values.config.logRetentionDays }} day(s) (config.logRetentionDays).
 
   To watch logs:
     kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "kubecron.name" . }} -f

@@ -90,6 +90,38 @@ Name of the OIDC Secret.
 {{- end }}
 
 {{/*
+The release's mode, validated. "standalone" and "collector" are accepted as the
+aliases the binary accepts, and normalised here so every template can compare
+against exactly two values.
+
+A typo fails the install rather than silently selecting the default: rendering a
+"sever"-mode release as a full UI with suspend/resume/trigger exposed is the
+kind of default that is discovered in production.
+*/}}
+{{- define "kubecron.mode" -}}
+{{- $m := .Values.mode | default "ui" -}}
+{{- if or (eq $m "ui") (eq $m "standalone") -}}
+ui
+{{- else if or (eq $m "server") (eq $m "collector") -}}
+server
+{{- else -}}
+{{- fail (printf "\n\nmode=%s is not a KubeCron mode.\n\nChoose one:\n  * mode: ui      — the standalone dashboard (default)\n  * mode: server  — the headless read-only collector API\n" $m) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Name of the Secret holding the collector API token, or "" when no token is
+configured. Callers use emptiness as the test for "is a front door configured".
+*/}}
+{{- define "kubecron.apiTokenSecretName" -}}
+{{- if .Values.api.existingSecret }}
+{{- .Values.api.existingSecret }}
+{{- else if .Values.api.token }}
+{{- printf "%s-api" (include "kubecron.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
 Name of the PVC.
 */}}
 {{- define "kubecron.pvcName" -}}
@@ -102,30 +134,42 @@ Name of the PVC.
 
 {{/*
 Refuse to render a deployment that is reachable from outside the cluster while
-authentication is switched off (AUDIT SEC-28).
-
-KubeCron has no authentication of its own: when oidc.enabled is false, the
-operator gate in internal/api/server.go becomes a deliberate pass-through and
-the auth middleware is never installed at all. Every route is then anonymous —
-including POST suspend/resume/trigger, which act on *every* cluster whose
-kubeconfig is mounted. A single unauthenticated request can suspend a backup
-CronJob fleet-wide.
+no front door is configured for the mode it runs in (AUDIT SEC-28).
 
 Both exposure paths are covered, not just the Ingress: a LoadBalancer or
-NodePort Service reaches outside the cluster just as effectively.
+NodePort Service reaches outside the cluster just as effectively. Any new
+exposure path added to this chart must be added here.
 
-The escape hatch exists because "ClusterIP behind a trusted mesh/VPN, auth
-handled upstream" is a legitimate deployment — but it has to be stated, not
-arrived at by leaving a default alone.
+What "no front door" means differs by mode, and so does what it costs:
+
+  * mode: ui with oidc.enabled=false — the operator gate in
+    internal/api/server.go becomes a deliberate pass-through and the auth
+    middleware is never installed. Every route is anonymous, including POST
+    suspend/resume/trigger, which act on *every* cluster whose kubeconfig is
+    mounted. A single unauthenticated request can suspend a backup CronJob
+    fleet-wide.
+
+  * mode: server with no api.token — there are no mutating routes to reach, so
+    this is disclosure rather than control: the full CronJob inventory,
+    schedules, run outcomes, resource usage and captured log bodies, plus
+    /metrics. Milder, and still not something to arrive at by leaving a default
+    alone.
+
+The escape hatch exists because "reachable only from a trusted mesh or VPN,
+auth handled upstream" is a legitimate deployment — but it has to be stated.
 */}}
 {{- define "kubecron.validateExposure" -}}
-{{- if not .Values.oidc.enabled }}
+{{- $mode := include "kubecron.mode" . -}}
+{{- $guarded := ternary .Values.oidc.enabled (ne (include "kubecron.apiTokenSecretName" .) "") (eq $mode "ui") -}}
+{{- if not $guarded }}
 {{- if not .Values.security.acknowledgeInsecureExposure }}
+{{- $fix := ternary "set oidc.enabled=true (recommended), or" "set api.token (or api.existingSecret) to require a bearer token (recommended), or" (eq $mode "ui") -}}
+{{- $risk := ternary "Every endpoint becomes anonymous, including suspend/resume/trigger, which act on every cluster whose kubeconfig is mounted." "Every /api/v1 route and /metrics answers anonymously, disclosing the whole CronJob inventory, run outcomes and captured log bodies." (eq $mode "ui") -}}
 {{- if .Values.ingress.enabled }}
-{{- fail "\n\nSEC-28: ingress.enabled=true with oidc.enabled=false would expose KubeCron with NO authentication.\nEvery endpoint becomes anonymous, including suspend/resume/trigger, which act on every cluster whose kubeconfig is mounted.\n\nChoose one:\n  * set oidc.enabled=true (recommended), or\n  * set security.acknowledgeInsecureExposure=true if the Ingress is on a trusted network and authentication is enforced upstream.\n" }}
+{{- fail (printf "\n\nSEC-28: ingress.enabled=true in mode=%s with no authentication configured.\n%s\n\nChoose one:\n  * %s\n  * set security.acknowledgeInsecureExposure=true if the Ingress is on a trusted network and authentication is enforced upstream.\n" $mode $risk $fix) }}
 {{- end }}
 {{- if ne .Values.service.type "ClusterIP" }}
-{{- fail (printf "\n\nSEC-28: service.type=%s with oidc.enabled=false would expose KubeCron outside the cluster with NO authentication.\nEvery endpoint becomes anonymous, including suspend/resume/trigger, which act on every cluster whose kubeconfig is mounted.\n\nChoose one:\n  * set oidc.enabled=true (recommended),\n  * keep service.type=ClusterIP and use `kubectl port-forward`, or\n  * set security.acknowledgeInsecureExposure=true if the network is trusted and authentication is enforced upstream.\n" .Values.service.type) }}
+{{- fail (printf "\n\nSEC-28: service.type=%s in mode=%s reaches outside the cluster with no authentication configured.\n%s\n\nChoose one:\n  * %s\n  * keep service.type=ClusterIP and use `kubectl port-forward`, or\n  * set security.acknowledgeInsecureExposure=true if the network is trusted and authentication is enforced upstream.\n" .Values.service.type $mode $risk $fix) }}
 {{- end }}
 {{- end }}
 {{- end }}

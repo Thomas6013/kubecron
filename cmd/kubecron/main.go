@@ -27,13 +27,26 @@ import (
 
 // Config holds all runtime configuration sourced from environment variables.
 type Config struct {
+	// Mode selects the HTTP surface: "ui" (default) serves the dashboard and
+	// the CronJob controls; "server" serves only the read-only /api/v1
+	// collector contract. The collection machinery below — informers, sampler,
+	// log streamer, retention — is identical in both.
+	Mode                  string `env:"KUBECRON_MODE"           envDefault:"ui"`
 	KubeconfigDir         string `env:"KUBECONFIG_DIR"          envDefault:"/etc/kubecron/kubeconfigs"`
 	DBPath                string `env:"DB_PATH"                 envDefault:"/data/kubecron.db"`
 	Port                  int    `env:"PORT"                    envDefault:"8080"`
 	RetentionDays         int    `env:"RETENTION_DAYS"          envDefault:"90"`
 	LogRetentionDays      int    `env:"LOG_RETENTION_DAYS"      envDefault:"14"`
 	MetricsSampleInterval int    `env:"METRICS_SAMPLE_INTERVAL" envDefault:"15"` // seconds
-	OIDC                  auth.Config
+	// ClusterID names the cluster when KubeCron runs on its own ServiceAccount
+	// with no kubeconfig directory — the one-collector-per-cluster shape. It is
+	// the ID a consumer sees in /api/v1/clusters and the key every stored row
+	// hangs off, so changing it on an existing deployment orphans its history.
+	ClusterID string `env:"CLUSTER_ID" envDefault:"local"`
+	// APIToken, when set, is required as `Authorization: Bearer <token>` on
+	// every request in server mode. Ignored in UI mode, which uses OIDC.
+	APIToken string `env:"API_TOKEN"`
+	OIDC     auth.Config
 }
 
 func main() {
@@ -44,9 +57,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	mode, err := api.ParseMode(cfg.Mode)
+	if err != nil {
+		slog.Error("config parse failed", "err", err)
+		os.Exit(1)
+	}
+
 	// 2. Structured JSON logging.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	slog.Info("kubecron starting", "port", cfg.Port, "db", cfg.DBPath)
+	slog.Info("kubecron starting", "mode", string(mode), "port", cfg.Port, "db", cfg.DBPath)
 
 	// Root context — cancelled on SIGTERM / SIGINT.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -63,7 +82,7 @@ func main() {
 	go storage.StartRetention(ctx, store, cfg.RetentionDays, cfg.LogRetentionDays)
 
 	// 5. Load kubeconfigs → one ClusterClient per file.
-	mgr := cluster.NewManager(store, cfg.KubeconfigDir)
+	mgr := cluster.NewManager(store, cfg.KubeconfigDir, cfg.ClusterID)
 	if err := mgr.Load(ctx); err != nil {
 		// Non-fatal: some clusters may have failed; others are still loaded.
 		slog.Warn("cluster loading completed with errors", "err", err)
@@ -117,16 +136,24 @@ func main() {
 		return true
 	}
 
-	// 9. Optional OIDC authenticator.
+	// 9. The front door, which differs by mode.
+	//
+	// UI mode is browsed by a person, so it uses OIDC: an unauthenticated
+	// request is redirected to an identity provider. Server mode is called by a
+	// program, which cannot complete that redirect, so it uses a bearer token
+	// instead. Configuring the wrong one for the mode is a silent way to end up
+	// with no front door at all, so each mode says what it found.
 	var authenticator *auth.Authenticator
-	if cfg.OIDC.Enabled {
+	switch {
+	case mode.ServesUI() && cfg.OIDC.Enabled:
 		authenticator, err = auth.NewAuthenticator(ctx, cfg.OIDC)
 		if err != nil {
 			slog.Error("OIDC initialisation failed", "err", err)
 			os.Exit(1)
 		}
 		slog.Info("OIDC authentication enabled", "issuer", cfg.OIDC.IssuerURL)
-	} else {
+
+	case mode.ServesUI():
 		// The Helm chart refuses to install an externally-reachable release with
 		// OIDC off (SEC-28), but nothing stops a raw manifest, a Compose file or
 		// a `go run` from doing it. Say so once, loudly, at Warn: without OIDC
@@ -135,6 +162,25 @@ func main() {
 		// on every cluster whose kubeconfig is mounted.
 		slog.Warn("OIDC is disabled — all endpoints are UNAUTHENTICATED, including suspend/resume/trigger on every connected cluster; do not expose this service outside a trusted network",
 			"remediation", "set OIDC_ENABLED=true")
+
+	case cfg.APIToken != "":
+		slog.Info("collector API requires a bearer token", "mode", string(mode))
+		if cfg.OIDC.Enabled {
+			// Not fatal — the token is a working front door and refusing to
+			// start would be a worse outcome than the misconfiguration.
+			slog.Warn("OIDC_ENABLED is set but has no effect in server mode: there is no browser flow to run. API_TOKEN is what guards this instance")
+		}
+
+	default:
+		// Milder than the UI-mode warning, and deliberately so: a collector
+		// registers no mutating route, so the exposure is disclosure of the
+		// CronJob inventory, schedules, run outcomes and log bodies — not
+		// anonymous control of the fleet.
+		slog.Warn("no API_TOKEN set — the collector API is UNAUTHENTICATED and discloses every CronJob, run outcome and captured log body it holds; keep it on a ClusterIP Service reached by port-forward",
+			"remediation", "set API_TOKEN")
+		if cfg.OIDC.Enabled {
+			slog.Warn("OIDC_ENABLED is set but has no effect in server mode: there is no browser flow to run", "remediation", "set API_TOKEN instead")
+		}
 	}
 
 	// 10. Prometheus state collector. Republishes the gauge-valued metrics from
@@ -145,10 +191,16 @@ func main() {
 	go metrics.NewStateCollector(store, metrics.DefaultCollectInterval).Run(ctx)
 
 	// 11. HTTP server.
-	srv := api.NewServer(store, mgr.Registry(), broadcaster, cacheSynced, authenticator)
+	info := api.CollectorInfo{
+		Mode:                  mode,
+		RetentionDays:         cfg.RetentionDays,
+		LogRetentionDays:      cfg.LogRetentionDays,
+		SampleIntervalSeconds: cfg.MetricsSampleInterval,
+	}
+	srv := api.NewServer(store, mgr.Registry(), broadcaster, cacheSynced, authenticator, info, cfg.APIToken)
 
 	go func() {
-		slog.Info("http server listening", "port", cfg.Port)
+		slog.Info("http server listening", "port", cfg.Port, "mode", string(mode))
 		if err := srv.Start(cfg.Port); err != nil {
 			slog.Error("http server exited", "err", err)
 		}

@@ -24,16 +24,32 @@ type Manager struct {
 	registry      *Registry
 	store         storage.Store
 	kubeconfigDir string
+	// localID names the cluster in the in-cluster fallback — the shape a
+	// collector deployed one-per-cluster runs in, where there is no kubeconfig
+	// filename to take a name from. It is the ID a consumer sees and the key
+	// every stored row hangs off, so it defaults to "local" and changing it on
+	// a populated database orphans that database's history.
+	localID string
 }
 
-// NewManager creates a Manager that will read kubeconfigs from kubeconfigDir.
-func NewManager(store storage.Store, kubeconfigDir string) *Manager {
+// NewManager creates a Manager that will read kubeconfigs from kubeconfigDir,
+// falling back to the pod's own ServiceAccount under the name localID. An
+// empty localID means "local".
+func NewManager(store storage.Store, kubeconfigDir, localID string) *Manager {
+	if localID == "" {
+		localID = defaultLocalID
+	}
 	return &Manager{
 		registry:      NewRegistry(),
 		store:         store,
 		kubeconfigDir: kubeconfigDir,
+		localID:       localID,
 	}
 }
+
+// defaultLocalID is the historical name of the in-cluster cluster. It is not
+// merely a default: existing databases key their rows on it.
+const defaultLocalID = "local"
 
 // Load reads every file in the kubeconfig directory, builds a ClusterClient for
 // each one, and registers it. If the directory is absent or empty, it falls
@@ -113,10 +129,10 @@ func (m *Manager) loadInCluster(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("in-cluster config unavailable: %w", err)
 	}
-	if err := m.registerCluster(ctx, "local", cfg); err != nil {
+	if err := m.registerCluster(ctx, m.localID, cfg); err != nil {
 		return err
 	}
-	m.markRemovedClusters(ctx, []string{"local"})
+	m.markRemovedClusters(ctx, []string{m.localID})
 	return nil
 }
 

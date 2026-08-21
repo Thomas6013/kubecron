@@ -8,6 +8,13 @@ Context file for Claude Code. Covers architecture, commands, conventions, and de
 
 KubeCron is a **single-binary Go application** that monitors Kubernetes CronJob executions across multiple clusters. It provides live log streaming, run history, resource tracking, and CronJob control (suspend/resume/trigger) via a server-rendered web UI.
 
+**Two modes, one binary** (`KUBECRON_MODE`, default `ui`):
+
+- **`ui`** (aliases: `standalone`) — the product above: dashboard, the JSON API behind its HTMX fragments, and the CronJob controls.
+- **`server`** (aliases: `collector`) — headless recorder. Serves only the read-only `/api/v1` contract; registers no HTML route and no mutating route, and the chart grants it no mutating RBAC verb. Meant to run one-per-cluster on its own ServiceAccount and be read on demand by a console (KubeDeck) that was not running when a run happened.
+
+Collection is identical in both modes — same informers, sampler, log capture, retention. Only route registration and the middleware chain differ (`internal/api/server.go`). Contract: `docs/COLLECTOR-API.md`.
+
 - **Language**: Go 1.26, stdlib `net/http` router (Go 1.22+ enhanced routing), `log/slog` structured logging
 - **UI rendering**: Raw HTML via `fmt.Fprintf` in `internal/api/html.go` + `html_components.go` — no template engine, no Node.js build step
 - **Database**: SQLite via `modernc.org/sqlite` (pure Go, no CGO, WAL mode, embedded migrations)
@@ -35,6 +42,9 @@ internal/
     handlers_cronjob.go       # Suspend/resume/trigger endpoints
     handlers_runs.go          # Run list, run detail, SSE stream, log download
     handlers_sse.go           # GET /api/runs/{id}/stream (SSE log streaming)
+    handlers_v1.go            # The /api/v1 collector contract (read-only, versioned)
+    mode.go                   # Mode (ui | server) and what each permits
+    bearer.go                 # BearerAuth — server mode's front door (API_TOKEN)
     html.go                   # Shared HTML head/foot, nav, breadcrumb, countdown, statusBadge
     html_components.go        # Reusable CronJob row, run row, action buttons, table headers
     html_log.go               # logSearchBar, logSearchJS
@@ -74,6 +84,8 @@ internal/
 docs/
   AUDIT.md                    # Engineering audit, pass history and finding ids
   PRODUCT.md                  # Product strategy: dependency levers, phase plan, anti-goals
+  COLLECTOR-API.md            # The /api/v1 wire contract consumed by KubeDeck
+  openapi.yaml                # OpenAPI 3.1 of /api/v1 — machine-readable companion
 
 migrations/                   # SQL files embedded in binary via embed.FS
 charts/kubecron/              # Helm chart (cluster installs)
@@ -113,6 +125,9 @@ See `.env.example`. Key variables:
 
 | Variable | Default | Description |
 |---|---|---|
+| `KUBECRON_MODE` | `ui` | `ui` serves the dashboard + controls; `server` serves only the read-only `/api/v1` collector API. Aliases: `standalone`, `collector` |
+| `API_TOKEN` | _(empty)_ | Bearer token required on every request in `server` mode (except `/healthz`, `/readyz`). Empty = anonymous |
+| `CLUSTER_ID` | `local` | Name this cluster reports as when watching itself via its own ServiceAccount. Every stored row keys off it |
 | `KUBECONFIG_DIR` | `/etc/kubecron/kubeconfigs` | One kubeconfig file per cluster |
 | `DB_PATH` | `/data/kubecron.db` | SQLite database file |
 | `PORT` | `8080` | HTTP listen port |
@@ -150,7 +165,8 @@ Migrations are embedded SQL files in `migrations/` applied at startup via `embed
 
 ## Security Model
 
-- **Service Account RBAC** — `get`/`list`/`watch` on CronJobs, Jobs, Pods; `patch` on CronJobs; `create` on Jobs. No Secrets access.
+- **Service Account RBAC** — `get`/`list`/`watch` on CronJobs, Jobs, Pods; `patch` on CronJobs; `create` on Jobs. No Secrets access. In `mode: server` the chart grants **only** the read verbs: collector mode registers no mutating route, and dropping the verbs makes that claim checkable from outside the process.
+- **Collector front door** — `mode: server` uses `API_TOKEN` (bearer), not OIDC: an unauthenticated request under OIDC is answered with a 302 to an identity provider, which a machine client cannot follow. `/healthz` and `/readyz` stay open for the kubelet; `/metrics` does not (SEC-29 — with no dashboard in front of it, it would be an anonymous inventory dump).
 - **Distroless image** — `gcr.io/distroless/static:nonroot`; runs as non-root.
 - **No CGO** — `CGO_ENABLED=0`; pure Go binary.
 - **OIDC session** — signed session cookie; session key stored in K8s Secret; never logged.
@@ -172,7 +188,8 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
 - **SEC-23 (partial)** — nosniff/XFO/Referrer-Policy shipped; CSP (needs inline-script nonce refactor) and HSTS still missing.
 - **SEC-24** — rate limiter proxy-blind (`RemoteAddr` behind ingress = collective lockout) with unbounded bucket map.
-- **SEC-29** — `/metrics` is auth-exempt and now discloses the full cluster/namespace/CronJob inventory, schedules, run outcomes and resource usage. Keep it off the public Ingress; scope the scrape with a NetworkPolicy.
+- **SEC-29** — in `mode: ui`, `/metrics` is auth-exempt and discloses the full cluster/namespace/CronJob inventory, schedules, run outcomes and resource usage. Keep it off the public Ingress; scope the scrape with a NetworkPolicy. (In `mode: server` it sits behind `API_TOKEN` — see SEC-30.)
+- **SEC-30** — `mode: server` defaults to anonymous: with `API_TOKEN` unset, `/api/v1` and `/metrics` disclose the CronJob inventory, run outcomes and **captured log bodies** to anyone who can reach the Service. Mitigated (chart guard on external exposure, startup `slog.Warn`, token covers `/metrics`), not closed — a ClusterIP install is still anonymous by default.
 - **INFRA-1** — base images use floating tags. Fix: pin with `@sha256:...` — but **only after SUP-1**, or the pin freezes a vulnerable stdlib into every release.
 
 ### Infra & CI — Medium Priority
@@ -187,9 +204,14 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
 ### Testing — Medium Priority
 
-- **TEST-1** — schedule (incl. timezone/DST), auth, storage (incl. the migration upgrade path), broadcaster, watcher (Job + CronJob handlers), HTTP handlers covered; `go test -race` runs in CI (`ci.yml`). Still missing: PodHandler, sampler, Streamer, cluster.Manager; no coverage threshold.
+- **TEST-1** — schedule (incl. timezone/DST), auth, storage (incl. the migration upgrade path and run paging), broadcaster, watcher (Job + CronJob handlers), HTTP handlers, mode routing and the `/api/v1` contract covered; `go test -race` runs in CI (`ci.yml`). Still missing: PodHandler, sampler, Streamer, cluster.Manager; no coverage threshold.
 
 ### Resolved (archived)
+
+- **BUG-22** — missed-run detection was silently off for anything sparser than daily _(v0.4.0)_. `PrevRun` scanned back a fixed 25 hours, so a weekly CronJob had no occurrence in the window on six days out of seven and a monthly one on twenty-nine days out of thirty; it returned an error, `IsMissed` read that as "cannot say" and answered **false**. A healthy monthly job and one silent for seventy days gave the same answer, so nothing looked wrong. The window is now derived from the schedule's own cadence and expanded — which also cut the per-minute case from ~1 500 `Next()` calls per row to ~3. Second half: when the most recent occurrence is still inside `MissedGracePeriod`, `IsMissed` steps back to the one before rather than answering false, because a per-minute CronJob is inside *some* occurrence's grace period at every instant and could therefore never be reported missed at all. **The step-back only applies when a run exists to compare against** — with none, the earlier occurrence may predate the CronJob, and a job created three minutes ago must not be flagged for a tick from before it existed. Found while porting this package to KubeDeck; the two implementations were then diffed over 13 scenarios and agree on all of them.
+
+- **BUG-21** — run-history paging returned nothing past the first page _(v0.4.0)_. The driver stores a `time.Time` in Go's `time.Time.String()` layout, which is not ISO 8601, so SQLite's `datetime()` returned NULL and `datetime(started_at) < datetime(?)` was NULL for every row — the UI's "Load more" silently stopped at 50 runs. `ListJobRunsPaged` now takes a `time.Time` and compares directly. **Do not wrap `started_at` in a SQLite date function**; comparisons against it are lexicographic, which is what `ORDER BY started_at` already relied on.
+- **SEC-31** — collector mode cannot mutate _(v0.4.0)_. Enforced twice: the mutating routes are never registered, and the chart grants no `patch`/`create` verb in `mode: server`.
 
 - **DOM-1** — `spec.timeZone` now honoured end to end _(v0.2.0)_. `schedule.{Parse,NextRun,PrevRun}` take an IANA zone; `cmd/kubecron` imports `time/tzdata` because distroless ships no zoneinfo. An unresolvable schedule or zone renders `unresolved` rather than a wrong countdown.
 - **BUG-20** — deleted CronJobs/clusters are soft-deleted _(v0.2.0)_: hidden from listings, Prometheus series dropped, history preserved, revived on recreation. Caught by `OnDelete`, by a post-cache-sync `Reconcile` (for deletions that happened while KubeCron was down), and by `MarkClustersDeletedExcept` on kubeconfig load.
@@ -210,7 +232,9 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 - **Error handling**: never return raw K8s API or DB errors to HTTP clients. Log with `slog.Error()`, return 500.
 - **Secrets**: never log kubeconfig paths or content, OIDC secrets, or session keys.
 - **Versioning**: update `CHANGELOG.md` and the `Version` constant in `internal/version/version.go` on every release.
-- **RBAC**: any new K8s API access must be added to `charts/kubecron/templates/clusterrole.yaml`.
+- **RBAC**: any new K8s API access must be added to `charts/kubecron/templates/clusterrole.yaml`. A mutating verb belongs in the `mode: ui` branch only.
+- **Modes**: a new route is registered in `registerUI` (dashboard, unversioned `/api/*`, anything mutating) or in `registerCollectorAPI` (`/api/v1`, GET-only, served in both modes). Never both, and never a mutating route in the second — see `docs/COLLECTOR-API.md`.
+- **The `/api/v1` contract is a promise**: fields may be added within `v1`, never removed, renamed or repurposed. A breaking change mints `v2` and `api_versions` lists both. Absence is never reported as fact — a shape that can be empty must carry the field that says *why* (`observed_since`, `expired`, `metrics_enabled`). Any change to a `/api/v1` shape must land in `docs/openapi.yaml` **and** `docs/COLLECTOR-API.md` in the same commit.
 - **Docker images**: published only on `*.*.*` tag push — `git tag 0.3.0 && git push origin 0.3.0`.
 
 ---
@@ -239,9 +263,13 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
 ### Helm chart
 - [ ] If env vars changed: update `charts/kubecron/values.yaml` + `templates/deployment.yaml`
-- [ ] If RBAC changed: update `charts/kubecron/templates/clusterrole.yaml`
+- [ ] If RBAC changed: update `charts/kubecron/templates/clusterrole.yaml` (both mode branches)
+- [ ] Render both modes, not just the default:
+      `helm template t charts/kubecron` and `helm template t charts/kubecron --set mode=server`
+- [ ] If a new exposure path was added, extend `kubecron.validateExposure` (SEC-28)
 
 ### Documentation
+- [ ] `docs/COLLECTOR-API.md` **and** `docs/openapi.yaml` — update together if any `/api/v1` shape changed
 - [ ] `CHANGELOG.md` — all changes documented under the new version with today's date
 - [ ] `ROADMAP.md` — mark shipped items as `[x]` with the version tag
 - [ ] `README.md` — update if user-facing features, env vars, or install steps changed
