@@ -1,3 +1,5 @@
+{{- $discoverable := and (include "kubecron.programReadable" .) .Values.service.discoverable -}}
+{{- $secret := include "kubecron.apiTokenSecretName" . -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -5,20 +7,37 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubecron.labels" . | nindent 4 }}
-    {{- if and (eq (include "kubecron.mode" .) "server") .Values.service.discoverable }}
+    {{- if $discoverable }}
     {{- /* Discovery labels. A console looks for these rather than being handed
-           a URL per cluster; a collector that is not labelled is simply not
-           found, which degrades to "no collector here" by itself. */}}
+           a URL per cluster — fourteen collector URLs typed into a settings page
+           is fourteen things to get wrong. A Service that is not labelled is
+           simply not found, which degrades to "no collector here" by itself.
+
+           Gated on whether a program can actually read the API, not on the
+           mode: advertising an instance whose every API request ends in a login
+           redirect would have a console report a collector it can never read. */}}
     kubecron.io/collector: "true"
     app.kubernetes.io/component: collector
     {{- end }}
-  {{- if and (eq (include "kubecron.mode" .) "server") .Values.service.discoverable }}
+  {{- if $discoverable }}
   annotations:
     kubecron.io/api-version: v1
     kubecron.io/api-path: /api/v1
-    {{- /* Whether a caller needs a bearer token, so a console can say
-           "found, but I have no credential" instead of showing an empty panel. */}}
-    kubecron.io/auth: {{ ternary "bearer" "none" (ne (include "kubecron.apiTokenSecretName" .) "") | quote }}
+    {{- /* Whether a caller needs a credential, so a console can say "found, but
+           I have no token for it" instead of showing an empty panel or a bare
+           401. */}}
+    kubecron.io/auth: {{ ternary "bearer" "none" (ne $secret "") | quote }}
+    {{- if $secret }}
+    {{- /* Where the credential lives, so the console does not have to guess a
+           name. A console reaching this Service already holds the operator's
+           own kubeconfig, and reading one Secret with it is strictly less than
+           what that kubeconfig already grants — the token was never a barrier
+           against the operator, it is a barrier against whoever can reach the
+           Service with no cluster credential at all. Naming it here is what
+           removes the last thing anyone has to type. */}}
+    kubecron.io/auth-secret: {{ $secret | quote }}
+    kubecron.io/auth-secret-key: "api-token"
+    {{- end }}
   {{- end }}
 spec:
   type: {{ .Values.service.type }}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"net/http/httptest"
 	"testing"
 
@@ -228,5 +229,158 @@ func TestServerModeInstallsNoCSRFCookie(t *testing.T) {
 	srv.buildHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/collector", nil))
 	if c := w.Result().Cookies(); len(c) != 0 {
 		t.Errorf("server mode set %d cookie(s), want none", len(c))
+	}
+}
+
+// --- the split front door ----------------------------------------------------
+
+// fakeSession stands in for the OIDC middleware: it refuses anything without
+// the cookie by redirecting, which is precisely the behaviour a program cannot
+// follow and the reason the split exists. A real Authenticator cannot be built
+// here — it performs discovery against a live issuer — and a test that skipped
+// it would assert the routing with no guard installed at all.
+func fakeSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if p == "/healthz" || p == "/readyz" || p == "/metrics" || strings.HasPrefix(p, "/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if c, err := r.Cookie("kubecron_session"); err == nil && c.Value == "valid" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Redirect(w, r, "/auth/login?redirect="+r.URL.RequestURI(), http.StatusFound)
+	})
+}
+
+// ok is the handler behind the guard: reaching it means the guard let go.
+var ok = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("reached"))
+})
+
+// TestIsCollectorAPI pins what the token guard is allowed to cover. A path that
+// merely starts with the same letters is not this contract, and treating it as
+// one would move it out from behind the session guard.
+func TestIsCollectorAPI(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/api/v1", true},
+		{"/api/v1/", true},
+		{"/api/v1/collector", true},
+		{"/api/v1/runs/abc/logs", true},
+		// Not the contract, and must stay behind the session guard.
+		{"/api/v1beta", false},
+		{"/api/v1beta/collector", false},
+		{"/api/v10/collector", false},
+		{"/api/clusters", false},
+		{"/api", false},
+		{"/", false},
+		{"/metrics", false},
+		{"/auth/login", false},
+	}
+	for _, tc := range tests {
+		if got := isCollectorAPI(tc.path); got != tc.want {
+			t.Errorf("isCollectorAPI(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestWithoutATokenTheSessionKeepsEverything is the security condition the
+// whole change rests on. With no token there is no second door, so opening
+// /api/v1 would publish the cluster inventory, run outcomes and captured log
+// bodies to anyone who can reach the Service.
+func TestWithoutATokenTheSessionKeepsEverything(t *testing.T) {
+	guard := splitFrontDoor(fakeSession, "")(ok)
+
+	for _, path := range []string{"/", "/api/clusters", "/api/v1/collector", "/api/v1/runs/x/logs"} {
+		w := httptest.NewRecorder()
+		guard.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusFound {
+			t.Errorf("%s: got %d with no token configured, want the session guard to hold it (302)", path, w.Code)
+		}
+	}
+}
+
+// TestWithATokenTheAPIAnswersAProgram: a console carrying the token reaches the
+// contract, and one without it is refused with a challenge rather than a
+// redirect to a login page it cannot fill in.
+func TestWithATokenTheAPIAnswersAProgram(t *testing.T) {
+	const token = "collector-token"
+	guard := splitFrontDoor(fakeSession, token)(ok)
+
+	// No credential: 401 and a challenge, never a 302.
+	w := httptest.NewRecorder()
+	guard.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/collector", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("no credential: got %d, want 401", w.Code)
+	}
+	if w.Header().Get("WWW-Authenticate") == "" {
+		t.Error("no challenge, so a client cannot tell what it is missing")
+	}
+
+	// The wrong credential is refused too.
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/collector", nil)
+	r.Header.Set("Authorization", "Bearer wrong")
+	w = httptest.NewRecorder()
+	guard.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong credential: got %d, want 401", w.Code)
+	}
+
+	// The right one reaches the contract.
+	r = httptest.NewRequest(http.MethodGet, "/api/v1/collector", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	guard.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("with the token: got %d, want 200", w.Code)
+	}
+}
+
+// TestTheTokenDoorCoversOnlyTheContract: a token must not become a way past the
+// session guard for the dashboard, the unversioned API, or anything else.
+func TestTheTokenDoorCoversOnlyTheContract(t *testing.T) {
+	const token = "collector-token"
+	guard := splitFrontDoor(fakeSession, token)(ok)
+
+	for _, path := range []string{"/", "/api/clusters", "/clusters/c1", "/api/v1beta/collector"} {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		guard.ServeHTTP(w, r)
+		if w.Code != http.StatusFound {
+			t.Errorf("%s: got %d while carrying the API token; the session guard must still hold it", path, w.Code)
+		}
+	}
+}
+
+// TestASessionStillOpensEverything: adding the token door must not take the
+// dashboard away from the person logged into it.
+func TestASessionStillOpensEverything(t *testing.T) {
+	guard := splitFrontDoor(fakeSession, "collector-token")(ok)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.AddCookie(&http.Cookie{Name: "kubecron_session", Value: "valid"})
+	w := httptest.NewRecorder()
+	guard.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("a logged-in operator got %d on the dashboard, want 200", w.Code)
+	}
+}
+
+// TestTheProbesStayOpen: the kubelet carries no credential of either kind.
+func TestTheProbesStayOpen(t *testing.T) {
+	guard := splitFrontDoor(fakeSession, "collector-token")(ok)
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		w := httptest.NewRecorder()
+		guard.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: got %d, want 200 — the kubelet has no credential", path, w.Code)
+		}
 	}
 }

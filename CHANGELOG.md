@@ -10,6 +10,52 @@ _Nothing yet._
 
 ---
 
+## [0.4.1] - 2026-08-21
+
+### Fixed
+
+- **A `mode: ui` instance with OIDC enabled could not serve `/api/v1` to any
+  program.** The contract was registered and reachable, and the session
+  middleware answered every request to it with a 302 to the identity provider —
+  a login page a console cannot fill in. The network path was never the issue:
+  the middleware wraps the whole router, so a request arriving through a
+  port-forward from inside the cluster was refused exactly as one from an
+  Ingress.
+
+  When `API_TOKEN` is set, `/api/v1` is now guarded by the bearer token and
+  everything else by the session. Two doors, each for the client that can open
+  it — the arrangement `/metrics` already had.
+
+  **The split exists only when a token is actually configured.** With none, the
+  session guard keeps the whole surface, because the alternative is publishing
+  the cluster inventory, run outcomes and captured log bodies to anyone who can
+  reach the Service. That condition is structural rather than documented.
+
+  Path matching is exact about what the contract is: `/api/v1` and `/api/v1/…`
+  only, so `/api/v1beta` cannot be mistaken for it and moved out from behind the
+  session guard.
+
+### Changed
+
+- The chart renders `API_TOKEN` in **both** modes, not only `server`. In `ui`
+  mode it is what makes the instance readable by a console without opening
+  anything else.
+
+- **The Service now says where its token lives**, via
+  `kubecron.io/auth-secret` and `kubecron.io/auth-secret-key`. A console holding
+  the operator's kubeconfig reads the credential from the cluster instead of
+  being configured with it — the same reasoning that made discovery a label
+  rather than a URL per cluster. Reading one Secret is strictly less than what
+  that kubeconfig already grants, and the token was never a barrier against the
+  operator.
+
+- **Discovery labels are gated on whether a program can actually read the API**,
+  not on the mode. A `ui` release with OIDC and no token is no longer
+  advertised: every API request to it ends in a login redirect, so a console
+  would report a collector it can never read.
+
+---
+
 ## [0.4.0] - 2026-08-21
 
 The "two shapes" release: KubeCron keeps its dashboard and gains a headless

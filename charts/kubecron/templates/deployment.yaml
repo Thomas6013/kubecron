@@ -70,12 +70,10 @@ spec:
           value: {{ .Values.config.logRetentionDays | quote }}
         - name: METRICS_SAMPLE_INTERVAL
           value: {{ .Values.config.metricsSampleInterval | quote }}
-        {{- if eq (include "kubecron.mode" .) "server" }}
-        {{- /* Names the cluster when the pod watches itself through its own
-               ServiceAccount, which is the shape a per-cluster collector runs
-               in. Ignored when kubeconfigs are mounted: those name themselves. */}}
-        - name: CLUSTER_ID
-          value: {{ .Values.clusterID | quote }}
+        {{- /* The collector API's token. Rendered in BOTH modes: in ui mode it is
+               what lets a console read /api/v1 without following an OIDC
+               redirect it cannot complete, while the dashboard keeps the
+               session guard. Absent, /api/v1 stays behind the session. */}}
         {{- if include "kubecron.apiTokenSecretName" . }}
         - name: API_TOKEN
           valueFrom:
@@ -83,6 +81,12 @@ spec:
               name: {{ include "kubecron.apiTokenSecretName" . }}
               key: api-token
         {{- end }}
+        {{- if eq (include "kubecron.mode" .) "server" }}
+        {{- /* Names the cluster when the pod watches itself through its own
+               ServiceAccount, which is the shape a per-cluster collector runs
+               in. Ignored when kubeconfigs are mounted: those name themselves. */}}
+        - name: CLUSTER_ID
+          value: {{ .Values.clusterID | quote }}
         {{- end }}
         {{- if and .Values.oidc.enabled (eq (include "kubecron.mode" .) "ui") }}
         - name: OIDC_ENABLED

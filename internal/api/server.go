@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -200,9 +201,68 @@ func (s *Server) middlewares() []func(http.Handler) http.Handler {
 	secureCookies := s.authenticator != nil && s.authenticator.Secure()
 	chain := []func(http.Handler) http.Handler{Logger, Instrument, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
 	if s.authenticator != nil {
-		chain = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, chain...)
+		chain = append([]func(http.Handler) http.Handler{s.frontDoor()}, chain...)
 	}
 	return chain
+}
+
+// frontDoor picks the guard for a request by what is asking.
+//
+// OIDC answers an unauthenticated request with a 302 to an identity provider.
+// That is right for a person and useless to a program: a console reading
+// /api/v1 receives a redirect to a login page it cannot fill in, which is what
+// a KubeCron in ui mode did to every API client — the routes were registered
+// and reachable and answered "log in first" from behind a port forward, inside
+// the cluster, exactly as they did from an Ingress. The network path was never
+// the problem; the middleware wraps the router and sees every request.
+//
+// So when an API token is configured, /api/v1 is guarded by the token and
+// everything else by the session. Two doors, each for the client that can open
+// it — the arrangement /metrics already has.
+//
+// **The split only exists when a token is actually set.** Without one the
+// session guard keeps the whole surface, because the alternative is publishing
+// the cluster inventory, run outcomes and captured log bodies to anyone who can
+// reach the Service. That condition is the whole of the security here: it is
+// structural, not a documented convention, and it is why this returns the
+// session guard unchanged rather than an exemption list somebody could extend
+// without noticing what it costs.
+func (s *Server) frontDoor() func(http.Handler) http.Handler {
+	return splitFrontDoor(s.authenticator.Middleware, s.apiToken)
+}
+
+// splitFrontDoor is frontDoor's decision, with the session guard passed in.
+//
+// Separated so it can be tested: building a real Authenticator performs OIDC
+// discovery against a live issuer, and a test that cannot construct one ends up
+// asserting the routing with no guard installed at all — which passes whatever
+// the routing does.
+func splitFrontDoor(session func(http.Handler) http.Handler, apiToken string) func(http.Handler) http.Handler {
+	if apiToken == "" {
+		return session
+	}
+	token := BearerAuth(apiToken)
+
+	return func(next http.Handler) http.Handler {
+		guardedByToken := token(next)
+		guardedBySession := session(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isCollectorAPI(r.URL.Path) {
+				guardedByToken.ServeHTTP(w, r)
+				return
+			}
+			guardedBySession.ServeHTTP(w, r)
+		})
+	}
+}
+
+// isCollectorAPI reports whether a path belongs to the versioned contract.
+//
+// Prefix-matched on "/api/v1/" with the bare "/api/v1" allowed alongside, so
+// that no path outside the contract can be mistaken for one: "/api/v1beta"
+// shares the string "/api/v1" as a prefix and is not this API.
+func isCollectorAPI(path string) bool {
+	return path == "/api/v1" || strings.HasPrefix(path, "/api/v1/")
 }
 
 // Shutdown performs a graceful shutdown of the HTTP server.
