@@ -1,0 +1,883 @@
+openapi: 3.1.0
+
+# The KubeCron collector contract.
+#
+# Machine-readable companion to docs/COLLECTOR-API.md, which carries the
+# reasoning this file cannot. Read that first if you are deciding *whether* to
+# depend on something; read this if you are generating a client.
+#
+# Scope: only /api/v1. The unversioned /api/* routes back KubeCron's own HTMX
+# fragments, change with them, and are deliberately absent here.
+
+info:
+  title: KubeCron collector API
+  version: "1.0.0"
+  summary: Read-only run history for Kubernetes CronJobs, past the life of the Job object.
+  description: |
+    KubeCron records what Kubernetes forgets. The CronJob controller garbage-collects
+    finished Jobs after `successfulJobsHistoryLimit` (3 by default), which for a job
+    that runs every minute is a three-minute window before its duration, exit code and
+    logs are gone permanently. A collector deployed in the cluster observes them while
+    they exist and answers for them afterwards.
+
+    **Served in both modes.** `KUBECRON_MODE=server` serves only this API;
+    `KUBECRON_MODE=ui` serves it alongside the dashboard. A consumer cannot tell the
+    difference except through `mode` and `read_only` in the discovery document.
+
+    ## Compatibility
+
+    Call `GET /api/v1/collector` first. If none of the versions in `api_versions` is
+    recognised, **fall back to another source rather than failing** — a consumer of this
+    API is expected to be one rung of a degradation ladder, not to have a hard
+    dependency on it.
+
+    Within `v1`: fields may be added; existing fields are never removed, renamed or
+    repurposed. Enumerations (`status`, `trigger`, `mode`) may gain members, so handle
+    an unknown one without crashing. A breaking change mints `v2` and `api_versions`
+    lists both while `v1` is still served.
+
+    ## Absence is never a fact
+
+    Every shape that can come back empty carries the field that says *why*. A consumer
+    that ignores them will report the collector's own gaps as the cluster's failures:
+
+    | Looks like | Might actually be | Told apart by |
+    |---|---|---|
+    | A CronJob that never ran | The collector was installed after it last ran | `observed_since` |
+    | A run that printed nothing | Its log body aged out of retention | `expired`, `log_size_bytes` |
+    | A run that used no CPU | No Metrics API, or the run was shorter than one sampling interval | `metrics_enabled`, `interval_seconds` |
+
+    There is no backfill. A collector installed today has history from today.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: |
+      A collector is a ClusterIP Service reached by port-forward:
+      `kubectl port-forward -n kubecron svc/kubecron 8080:80`.
+      It needs no Ingress, no certificate and no public hostname, which is why a
+      shared bearer token is a sufficient front door.
+
+security:
+  - bearerAuth: []
+  - {} # API_TOKEN unset means every route answers anonymously.
+
+tags:
+  - name: discovery
+    description: What this collector is, holds, and can answer. Call first.
+  - name: cronjobs
+    description: The CronJobs a collector observes, and their schedule state.
+  - name: runs
+    description: Individual executions — history, samples, and log bodies.
+
+paths:
+  /api/v1/collector:
+    get:
+      operationId: getCollector
+      tags: [discovery]
+      summary: Discovery — version, capabilities, retention, observed clusters.
+      description: |
+        The entry point of the contract, and the whole compatibility story. Cheap
+        enough to call before every session.
+
+        `retention` is what tells a consumer whether an empty query window means
+        "nothing happened" or "we no longer hold it".
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collector" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/clusters:
+    get:
+      operationId: listClusters
+      tags: [discovery]
+      summary: The clusters this collector observes, and since when.
+      description: |
+        A collector deployed per cluster reports exactly one; a collector fed a
+        directory of kubeconfigs reports several. Soft-deleted clusters — those whose
+        kubeconfig was removed — are excluded.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [clusters]
+                properties:
+                  clusters:
+                    type: array
+                    items: { $ref: "#/components/schemas/Cluster" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/clusters/{clusterID}/cronjobs:
+    get:
+      operationId: listCronJobs
+      tags: [cronjobs]
+      summary: Every CronJob in a cluster, with last run and 7-day statistics folded in.
+      description: |
+        One aggregate read for the whole cluster, not three queries per CronJob.
+        Soft-deleted CronJobs are excluded, but their run history stays reachable
+        through the run endpoints — an existing link to a deleted CronJob's history
+        keeps working.
+      parameters:
+        - $ref: "#/components/parameters/ClusterID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cluster_id, cronjobs]
+                properties:
+                  cluster_id: { type: string, examples: ["prod-eu"] }
+                  cronjobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/CronJob" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/clusters/{clusterID}/cronjobs/{ns}/{name}/runs:
+    get:
+      operationId: listRuns
+      tags: [runs]
+      summary: Run history for one CronJob, newest first, paged.
+      parameters:
+        - $ref: "#/components/parameters/ClusterID"
+        - $ref: "#/components/parameters/Namespace"
+        - $ref: "#/components/parameters/Name"
+        - name: limit
+          in: query
+          description: Page size. Values outside 1..1000 fall back to the default.
+          schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+        - name: before
+          in: query
+          description: |
+            The previous page's `next_cursor`. **URL-encode it** — it is an RFC 3339
+            timestamp and contains a `+` for any non-UTC offset, which a query string
+            would otherwise decode as a space. (The server recovers that particular
+            mistake, but do not rely on it.)
+
+            The cursor is opaque and carries sub-second precision on purpose:
+            truncating it to whole seconds skips parallel pods of the same CronJob,
+            which start milliseconds apart. An unparseable cursor re-serves page one
+            rather than erroring.
+          schema: { type: string, format: date-time }
+          examples:
+            utc: { value: "2026-08-14T02:00:03.418Z" }
+      responses:
+        "200":
+          description: OK. An absent `next_cursor` means this was the last page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunsPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/clusters/{clusterID}/cronjobs/{ns}/{name}/daily:
+    get:
+      operationId: getDailyRunStats
+      tags: [runs]
+      summary: Per-day aggregates for a calendar heatmap.
+      description: |
+        Its own endpoint rather than a client-side fold of the run list, because
+        folding 90 days of a per-minute CronJob client-side means shipping 130 000 run
+        records to draw 90 squares.
+
+        Days absent from `daily` **and earlier than `observed_since`** are unwatched,
+        not idle. On a heatmap that is a fourth colour, not an empty square.
+      parameters:
+        - $ref: "#/components/parameters/ClusterID"
+        - $ref: "#/components/parameters/Namespace"
+        - $ref: "#/components/parameters/Name"
+        - name: days
+          in: query
+          description: Window length. Values outside 1..365 fall back to the default.
+          schema: { type: integer, default: 90, minimum: 1, maximum: 365 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DailyRunStats" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/runs/{id}:
+    get:
+      operationId: getRun
+      tags: [runs]
+      summary: One run, with its CronJob's identity split out.
+      description: |
+        `cronjob` saves the consumer parsing the composite `cronjob_id`. The split is
+        exact: a cluster ID is a kubeconfig filename stem and a namespace and name are
+        DNS labels, so none of them can contain the `/` separator.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, cronjob]
+                properties:
+                  run: { $ref: "#/components/schemas/JobRun" }
+                  cronjob: { $ref: "#/components/schemas/CronJobRef" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/runs/{id}/samples:
+    get:
+      operationId: getRunSamples
+      tags: [runs]
+      summary: CPU and memory sampled while the run was in flight.
+      description: |
+        The finest resolution available anywhere for a short run: metrics-server keeps
+        no history, so a forty-second job is invisible to any coarser observation.
+
+        An empty `samples` is **not** a claim that the run used nothing. It means the
+        run was shorter than `interval_seconds`, or the cluster's `metrics_enabled` is
+        false, or the raw points aged out — in which case `summary` survives them.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunSamples" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/runs/{id}/logs:
+    get:
+      operationId: getRunLogs
+      tags: [runs]
+      summary: The captured log body of a run.
+      description: |
+        The one thing no other source has. Prometheus holds no log lines; a cluster
+        with Loki has them and a cluster with neither has lost them permanently.
+
+        The whole body is returned by default, deliberately: a run's log exists nowhere
+        else once the pod is gone, so silently truncating it would be the worst
+        available default.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: limit
+          in: query
+          description: Return only the last N lines. Omit for the whole body.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RunLogs" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /api/v1/runs/{id}/logs.txt:
+    get:
+      operationId: downloadRunLogs
+      tags: [runs]
+      summary: The same log body as plain text.
+      description: |
+        Sent with `Content-Disposition: attachment`, for an operator saving a run's
+        output to a file. Carries no metadata — a consumer that needs to distinguish
+        an empty body from an expired one must use the JSON form.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: OK. One line per line, no timestamps.
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/runs/{id}/stream:
+    get:
+      operationId: streamRunLogs
+      tags: [runs]
+      summary: Server-sent events following a run that is still executing.
+      description: |
+        Long-lived; the server sets no write timeout on it. Check `running` on the logs
+        response before opening one — a finished run's stream will produce nothing.
+
+        Optional for a consumer that can reach the live pod itself. It is worth using
+        anyway on two counts: it needs no `pods/log` RBAC of the consumer's own, and it
+        keeps working after the pod is gone, which direct streaming does not.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: An SSE stream. Each event's `data` is one log line.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness. Always 200 while the process is up.
+      description: Never authenticated — the kubelet issues it and carries no credential.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: "ok" } }
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness. 200 once every informer cache has completed its initial list.
+      description: Never authenticated, for the same reason as `/healthz`.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: "ok" } }
+        "503":
+          description: Caches not yet synced.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { status: { type: string, const: "not ready" } }
+
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Prometheus exposition — 16 metric families.
+      description: |
+        **Behind the bearer token in server mode**, unlike the probes: with no dashboard
+        in front of it, this endpoint is otherwise an anonymous dump of the whole
+        CronJob inventory, its schedules, run outcomes and resource usage (AUDIT
+        SEC-29/SEC-30). A Prometheus scraping a token-protected collector needs an
+        `authorization` block in its scrape config.
+
+        Gauges are re-derived from the database every 30 s, so they survive a restart
+        instead of going blank until each CronJob next fires. Counters and the
+        histogram stay event-driven, because rebuilding them would double-count.
+
+        Family reference in docs/COLLECTOR-API.md.
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <API_TOKEN>`.
+
+        A static token rather than OIDC, because OIDC answers an unauthenticated
+        request with a 302 to an identity provider and a program cannot complete an
+        interactive login.
+
+        With `API_TOKEN` unset every route answers anonymously; the process says so at
+        WARN on startup, and the Helm chart refuses to render an externally-reachable
+        release in that state.
+
+  parameters:
+    ClusterID:
+      name: clusterID
+      in: path
+      required: true
+      description: As reported by `GET /api/v1/clusters` — never assumed.
+      schema: { type: string }
+      examples: { prod: { value: "prod-eu" } }
+    Namespace:
+      name: ns
+      in: path
+      required: true
+      schema: { type: string }
+      examples: { default: { value: "default" } }
+    Name:
+      name: name
+      in: path
+      required: true
+      description: The CronJob's name.
+      schema: { type: string }
+      examples: { backup: { value: "nightly-backup" } }
+    RunID:
+      name: id
+      in: path
+      required: true
+      description: The run's ID — the Job object's UID, as carried in `JobRun.id`.
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: |
+        Missing or invalid bearer token. Carries `WWW-Authenticate: Bearer`, so a client
+        can tell "I need a credential" from "the one I sent is wrong" — the difference
+        between prompting an operator and retrying forever.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, examples: ['Bearer realm="kubecron"'] }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: |
+        No such CronJob or run. An unmatched path *under `/api/v1/`* instead returns the
+        contract-identifying form, so a request from a newer contract learns which rung
+        it reached rather than parsing an HTML error page.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/Error" }
+              - { $ref: "#/components/schemas/UnknownEndpoint" }
+    ServerError:
+      description: |
+        Something failed server-side. The message is deliberately generic: raw
+        Kubernetes API and database errors are logged, never returned to a client.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, examples: ["run not found"] }
+
+    UnknownEndpoint:
+      description: Returned for any unmatched path under `/api/v1/`.
+      type: object
+      required: [error, api_version, product]
+      properties:
+        error: { type: string, examples: ["no such endpoint in collector API v1"] }
+        api_version: { type: string, examples: ["v1"] }
+        product: { type: string, const: "kubecron" }
+
+    Collector:
+      type: object
+      required:
+        [product, version, api_version, api_versions, mode, read_only,
+         capabilities, retention, sample_interval_seconds, clusters, server_at]
+      properties:
+        product: { type: string, const: "kubecron" }
+        version:
+          type: string
+          description: The KubeCron build's own version. Informational — branch on `api_versions`, not on this.
+          examples: ["0.4.0"]
+        api_version:
+          type: string
+          description: The contract this response is written in.
+          examples: ["v1"]
+        api_versions:
+          type: array
+          description: |
+            Every contract this build speaks. If none is recognised, fall back to
+            another source rather than failing.
+          items: { type: string }
+          examples: [["v1"]]
+        mode:
+          type: string
+          enum: [ui, server]
+          description: |
+            `server` is the headless collector; `ui` also serves the dashboard and the
+            CronJob controls. The recorded data is identical.
+        read_only:
+          type: boolean
+          description: |
+            True in server mode. Structural rather than configured — the mutating
+            routes are never registered and the Helm chart grants no mutating RBAC
+            verb, so the claim is checkable from outside the process.
+        capabilities: { $ref: "#/components/schemas/Capabilities" }
+        retention: { $ref: "#/components/schemas/Retention" }
+        sample_interval_seconds:
+          type: integer
+          description: |
+            Resource sampling period. Sets the resolution of the samples series, and
+            tells a consumer what a run shorter than one interval can be expected to
+            yield: nothing.
+          examples: [15]
+        clusters:
+          type: array
+          items: { $ref: "#/components/schemas/Cluster" }
+        server_at:
+          type: string
+          format: date-time
+          description: |
+            The collector's clock, UTC. Compare against your own before treating a
+            `next_run_at` countdown as authoritative.
+
+    Capabilities:
+      type: object
+      required: [run_history, run_logs, resource_samples, live_log_stream, mutations]
+      properties:
+        run_history:
+          type: boolean
+          description: Run records past the life of the Job object.
+        run_logs:
+          type: boolean
+          description: The log body of a finished run, past the life of the Pod.
+        resource_samples:
+          type: boolean
+          description: CPU/memory sampled while a run was in flight.
+        live_log_stream:
+          type: boolean
+          description: SSE tail of a run that is still executing.
+        mutations:
+          type: boolean
+          description: |
+            Suspend/resume/trigger. Always false in server mode. A console should
+            perform those itself, against the Kubernetes API, under its own
+            authorization — two components able to mutate the same CronJob means two
+            authorization models that have to stay in agreement.
+
+    Retention:
+      type: object
+      required: [run_days, log_days]
+      properties:
+        run_days:
+          type: integer
+          description: Days of run metadata kept (`RETENTION_DAYS`).
+          examples: [90]
+        log_days:
+          type: integer
+          description: |
+            Days of log bodies kept (`LOG_RETENTION_DAYS`). Normally shorter than
+            `run_days`: a run older than this keeps its record and loses its output,
+            which is what `expired` reports.
+          examples: [14]
+
+    Cluster:
+      type: object
+      required: [id, name, metrics_enabled, observed_since]
+      properties:
+        id:
+          type: string
+          description: |
+            Stable key. For a per-cluster collector it is `CLUSTER_ID` (default
+            `local`); for a multi-cluster one it is each kubeconfig's filename stem.
+          examples: ["prod-eu"]
+        name: { type: string }
+        metrics_enabled:
+          type: boolean
+          description: |
+            Whether the Metrics API answered at the last probe (re-probed every 5 min).
+            When false, runs on this cluster carry no resource samples — a missing
+            measurement, not an idle workload.
+        observed_since:
+          type: string
+          format: date-time
+          description: |
+            The first moment this collector saw the cluster. Nothing before it was
+            recorded by anybody, so a consumer must draw that period as unobserved
+            rather than as an absence of runs. **There is no backfill.**
+
+    CronJob:
+      type: object
+      required:
+        [id, cluster_id, namespace, name, schedule, time_zone, suspended,
+         missed, resources, updated_at]
+      properties:
+        id:
+          type: string
+          description: "Composite: `clusterID/namespace/name`. Stable; use `CronJobRef` rather than parsing it."
+          examples: ["prod-eu/default/nightly-backup"]
+        cluster_id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        schedule:
+          type: string
+          description: The cron expression verbatim, as `spec.schedule`.
+          examples: ["0 2 * * *"]
+        time_zone:
+          type: string
+          description: |
+            `spec.timeZone` (IANA name), empty when the CronJob declares none — in which
+            case Kubernetes evaluates the schedule in the controller's own zone.
+            **`next_run_at` is resolved in this zone**; a consumer recomputing the
+            schedule must use it or it will disagree with the cluster.
+          examples: ["Europe/Paris"]
+        suspended: { type: boolean }
+        next_run_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            **Omitted, not zeroed**, when the schedule or the zone cannot be resolved.
+            A wrong countdown is worse than an absent one — render nothing rather than
+            guessing.
+        missed:
+          type: boolean
+          description: |
+            The previous scheduled occurrence produced no run *this collector saw*.
+            Only meaningful because something was watching: do not derive it from
+            history alone, and do not report it for any period before `observed_since`.
+        last_successful_time:
+          type: [string, "null"]
+          format: date-time
+          description: From the CronJob's own `status.lastSuccessfulTime`.
+        resources: { $ref: "#/components/schemas/Resources" }
+        last_run:
+          oneOf:
+            - { $ref: "#/components/schemas/JobRun" }
+            - { type: "null" }
+          description: Absent when the CronJob has no recorded run.
+        stats_7d:
+          oneOf:
+            - { $ref: "#/components/schemas/RunStats" }
+            - { type: "null" }
+          description: Rolling 7-day window. Absent when the CronJob has no recorded run.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the collector last saw this object change.
+
+    CronJobRef:
+      type: object
+      required: [id, cluster_id, namespace, name]
+      properties:
+        id: { type: string }
+        cluster_id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+
+    Resources:
+      type: object
+      description: |
+        The pod template's requests and limits as Kubernetes quantity strings, empty
+        when unset. Never a placeholder — a consumer needs the absence itself, not a
+        rendering of it.
+      required: [cpu_request, cpu_limit, memory_request, memory_limit]
+      properties:
+        cpu_request: { type: string, examples: ["250m"] }
+        cpu_limit: { type: string, examples: ["1"] }
+        memory_request: { type: string, examples: ["512Mi"] }
+        memory_limit: { type: string, examples: ["1Gi"] }
+
+    JobRun:
+      type: object
+      required: [id, cronjob_id, pod_name, trigger, started_at, status, retry_count, log_size_bytes]
+      properties:
+        id:
+          type: string
+          description: The Job object's UID.
+        cronjob_id: { type: string }
+        pod_name: { type: string, examples: ["nightly-backup-29284560-x7k2n"] }
+        node_name:
+          type: [string, "null"]
+          description: Absent until the pod is scheduled.
+        container_image: { type: [string, "null"] }
+        trigger:
+          type: string
+          enum: [scheduled, manual]
+          description: |
+            `manual` is a run created by hand. It is not owned by the CronJob and
+            ignores `concurrencyPolicy` — worth saying in any UI that offers one.
+        started_at: { type: string, format: date-time }
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+          description: Absent while `status` is `running`.
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+          description: May gain members; handle an unknown one without crashing.
+        exit_code:
+          type: [integer, "null"]
+          description: |
+            The container's exit code. Present only once the pod terminated and the
+            collector observed it — a pod garbage-collected before the collector looked
+            leaves a run with an outcome and no code.
+        retry_count:
+          type: integer
+          description: Pod restarts observed for this run.
+        log_size_bytes:
+          type: integer
+          format: int64
+          description: |
+            Bytes of log captured. Kept for the run's whole life, so it survives
+            `log_days` and is what makes `expired` distinguishable from silence.
+        duration_ms: { type: [integer, "null"], format: int64 }
+        avg_cpu_millicores: { type: [integer, "null"], format: int64 }
+        max_cpu_millicores: { type: [integer, "null"], format: int64 }
+        avg_memory_bytes: { type: [integer, "null"], format: int64 }
+        max_memory_bytes: { type: [integer, "null"], format: int64 }
+
+    RunStats:
+      type: object
+      description: |
+        Aggregates over a rolling 7-day window. `running` runs are excluded from any
+        success rate — they have no outcome yet, and counting them as failures makes
+        every busy window look like a partial outage.
+      required: [total, succeeded, failed]
+      properties:
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        avg_duration_ms: { type: [integer, "null"], format: int64 }
+        max_duration_ms: { type: [integer, "null"], format: int64 }
+        avg_cpu_millicores: { type: [integer, "null"], format: int64 }
+        avg_memory_bytes: { type: [integer, "null"], format: int64 }
+
+    RunsPage:
+      type: object
+      required: [cronjob_id, cluster_id, namespace, name, runs]
+      properties:
+        cronjob_id: { type: string }
+        cluster_id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        runs:
+          type: array
+          items: { $ref: "#/components/schemas/JobRun" }
+        next_cursor:
+          type: string
+          description: |
+            Pass back as `?before=`, URL-encoded. Absent means the last page was
+            reached. Opaque — its timestamp shape is an implementation detail and may
+            change within v1.
+        observed_since:
+          type: string
+          format: date-time
+          description: |
+            Repeated on every page so a consumer paging backwards knows where the
+            record stops being a record and starts being an absence of one.
+
+    DailyRunStats:
+      type: object
+      required: [cronjob_id, cluster_id, namespace, name, days, daily]
+      properties:
+        cronjob_id: { type: string }
+        cluster_id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        days: { type: integer, description: The window actually applied, after clamping. }
+        daily:
+          type: array
+          description: |
+            Only days with at least one run appear. A missing day is either "did not
+            fire" or "not watched" — `observed_since` is what separates them.
+          items: { $ref: "#/components/schemas/DailyRunStat" }
+        observed_since: { type: string, format: date-time }
+
+    DailyRunStat:
+      type: object
+      required: [day, total, succeeded, running]
+      properties:
+        day:
+          type: string
+          description: Calendar day, `YYYY-MM-DD`, in the collector's own zone.
+          examples: ["2026-08-21"]
+        total: { type: integer }
+        succeeded: { type: integer }
+        running:
+          type: integer
+          description: |
+            Still executing at read time. Failures are `total - succeeded - running`,
+            not `total - succeeded`.
+
+    RunSamples:
+      type: object
+      required: [run_id, interval_seconds, samples, summary]
+      properties:
+        run_id: { type: string }
+        interval_seconds:
+          type: integer
+          description: |
+            The sampling period. Without it a consumer cannot tell an empty series on a
+            five-second run from a cluster with no Metrics API.
+          examples: [15]
+        samples:
+          type: array
+          items: { $ref: "#/components/schemas/ResourceSample" }
+        summary:
+          $ref: "#/components/schemas/SamplesSummary"
+
+    ResourceSample:
+      type: object
+      required: [id, run_id, sampled_at, cpu_millicores, memory_bytes]
+      properties:
+        id: { type: integer, format: int64 }
+        run_id: { type: string }
+        sampled_at: { type: string, format: date-time }
+        cpu_millicores: { type: integer, format: int64 }
+        memory_bytes: { type: integer, format: int64 }
+
+    SamplesSummary:
+      type: object
+      description: |
+        Computed when the run finished, and outliving the raw points: a run whose
+        samples have aged out still reports its peaks here.
+      properties:
+        avg_cpu_millicores: { type: [integer, "null"], format: int64 }
+        max_cpu_millicores: { type: [integer, "null"], format: int64 }
+        avg_memory_bytes: { type: [integer, "null"], format: int64 }
+        max_memory_bytes: { type: [integer, "null"], format: int64 }
+
+    RunLogs:
+      type: object
+      required: [run_id, lines, log_size_bytes, expired, truncated, running]
+      properties:
+        run_id: { type: string }
+        lines:
+          type: array
+          description: Oldest first.
+          items: { $ref: "#/components/schemas/LogLine" }
+        log_size_bytes:
+          type: integer
+          format: int64
+          description: What the collector recorded when it streamed the run.
+        expired:
+          type: boolean
+          description: |
+            The body was captured and has since been removed by log retention. **The
+            difference between "this run printed nothing" and "we no longer hold what
+            it printed"** — no consumer can tell them apart without this.
+        truncated:
+          type: boolean
+          description: A `?limit=` was applied and these are the tail.
+        running:
+          type: boolean
+          description: |
+            The run is still executing, so the body is incomplete.
+            `GET /api/v1/runs/{id}/stream` follows the rest.
+
+    LogLine:
+      type: object
+      required: [ts, line]
+      properties:
+        ts:
+          type: string
+          format: date-time
+          description: |
+            When the collector received the line, not when the container emitted it.
+            Close enough to order by; not a substitute for a timestamp the application
+            printed itself.
+        line: { type: string }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -22,17 +23,24 @@ type Server struct {
 	broadcaster   *streamer.Broadcaster
 	cacheSynced   func() bool
 	authenticator *auth.Authenticator // nil when OIDC is disabled
+	info          CollectorInfo
+	apiToken      string // bearer token for server mode; empty = unauthenticated
 	httpServer    *http.Server
 }
 
 // NewServer constructs a Server with the given dependencies.
-// authenticator may be nil to disable OIDC protection.
+//
+// authenticator may be nil to disable OIDC protection. info.Mode decides which
+// half of the HTTP surface Start registers; apiToken, when non-empty, is the
+// bearer token every request must carry in server mode.
 func NewServer(
 	store storage.Store,
 	registry *cluster.Registry,
 	broadcaster *streamer.Broadcaster,
 	cacheSynced func() bool,
 	authenticator *auth.Authenticator,
+	info CollectorInfo,
+	apiToken string,
 ) *Server {
 	return &Server{
 		store:         store,
@@ -40,27 +48,101 @@ func NewServer(
 		broadcaster:   broadcaster,
 		cacheSynced:   cacheSynced,
 		authenticator: authenticator,
+		info:          info,
+		apiToken:      apiToken,
 	}
 }
 
 // Start registers all routes, applies middleware, and begins listening on port.
 func (s *Server) Start(port int) error {
+	handler := s.buildHandler()
+
+	s.httpServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: handler,
+		// No WriteTimeout: SSE streams (/api/v1/runs/{id}/stream) are long-lived.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	return s.httpServer.ListenAndServe()
+}
+
+// buildHandler assembles the mux and the middleware chain for the configured
+// mode. It is separate from Start so tests can exercise the routing decisions
+// without binding a port.
+func (s *Server) buildHandler() http.Handler {
 	h := &Handler{
 		store:       s.store,
 		registry:    s.registry,
 		broadcaster: s.broadcaster,
 		cacheSynced: s.cacheSynced,
+		info:        s.info,
 	}
 
 	mux := http.NewServeMux()
 
+	// The versioned collector API. Registered in both modes: the standalone
+	// product answering the same contract is what lets an operator point
+	// KubeDeck at a KubeCron they already run, rather than deploying a second
+	// one beside it.
+	s.registerCollectorAPI(mux, h)
+
+	// Observability and probes, in both modes.
+	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /healthz", h.Healthz)
+	mux.HandleFunc("GET /readyz", h.Readyz)
+
+	if s.info.Mode.ServesUI() {
+		s.registerUI(mux, h)
+	} else {
+		// Server mode answers no HTML at all, so an unmatched path must not
+		// fall through to a page. A JSON 404 naming the mode is what a
+		// misconfigured consumer needs to see.
+		mux.HandleFunc("GET /", h.modeNotFound)
+	}
+
+	return Chain(mux, s.middlewares()...)
+}
+
+// registerCollectorAPI registers the /api/v1 contract read by KubeDeck.
+//
+// Every route here is a GET. That is the whole of collector mode's read-only
+// property: there is no mutating route to reach, in either mode, under this
+// prefix.
+func (s *Server) registerCollectorAPI(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("GET /api/v1/collector", h.Collector)
+	mux.HandleFunc("GET /api/v1/clusters", h.ListClustersV1)
+	mux.HandleFunc("GET /api/v1/clusters/{clusterID}/cronjobs", h.ListCronJobsV1)
+	mux.HandleFunc("GET /api/v1/clusters/{clusterID}/cronjobs/{ns}/{name}/runs", h.ListRunsV1)
+	mux.HandleFunc("GET /api/v1/clusters/{clusterID}/cronjobs/{ns}/{name}/daily", h.DailyRunStatsV1)
+	mux.HandleFunc("GET /api/v1/runs/{id}", h.GetRunV1)
+	mux.HandleFunc("GET /api/v1/runs/{id}/samples", h.GetResourceSamplesV1)
+	mux.HandleFunc("GET /api/v1/runs/{id}/logs", h.GetLogsV1)
+	mux.HandleFunc("GET /api/v1/runs/{id}/logs.txt", h.DownloadLogsV1)
+	mux.HandleFunc("GET /api/v1/runs/{id}/stream", h.StreamLogs)
+	// Anything else under the prefix answers in the contract's own vocabulary
+	// rather than falling through to the UI's 404 or, in server mode, to
+	// modeNotFound.
+	mux.HandleFunc("GET /api/v1/", h.v1NotFound)
+}
+
+// registerUI registers the dashboard, its static assets, the unversioned JSON
+// API that backs its HTMX fragments, and the CronJob controls.
+//
+// None of this exists in server mode. The mutating routes in particular are
+// absent rather than merely hidden: a collector that could suspend a CronJob
+// would be a second authorization model to keep in agreement with KubeDeck's,
+// and KubeCron's is off by default.
+func (s *Server) registerUI(mux *http.ServeMux, h *Handler) {
 	// Static assets (CSS, fonts fallback)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(static.FS))))
 
 	loginLimiter := RateLimit(10, time.Minute)
 	triggerLimiter := RateLimit(20, time.Minute)
 
-	// Auth routes
+	// Auth routes — a browser redirect flow, meaningless without pages to
+	// redirect to.
 	if s.authenticator != nil {
 		mux.Handle("GET /auth/login", loginLimiter(http.HandlerFunc(s.authenticator.HandleLogin)))
 		mux.HandleFunc("GET /auth/callback", s.authenticator.HandleCallback)
@@ -69,13 +151,15 @@ func (s *Server) Start(port int) error {
 		mux.HandleFunc("GET /auth/logged-out", s.authenticator.HandleLoggedOut)
 	}
 
-	// API — JSON
+	// API — JSON. Unversioned: this is the dashboard's own backing API and
+	// changes with it. External consumers use /api/v1.
 	mux.HandleFunc("GET /api/clusters", h.ListClusters)
 	mux.HandleFunc("GET /api/clusters/{clusterID}/cronjobs", h.ListCronJobs)
 	mux.HandleFunc("GET /api/clusters/{clusterID}/cronjobs/{ns}/{name}/runs", h.ListRuns)
 	mux.HandleFunc("GET /api/runs/{id}/stream", h.StreamLogs)
 	mux.HandleFunc("GET /api/runs/{id}/resources", h.GetResourceSamples)
 	mux.HandleFunc("GET /api/runs/{id}/logs.txt", h.DownloadLogs)
+
 	// operator wraps a mutating handler with the operator-authorization check
 	// when OIDC is enabled; otherwise it is a pass-through (open access).
 	operator := func(next http.Handler) http.Handler { return next }
@@ -86,11 +170,6 @@ func (s *Server) Start(port int) error {
 	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/resume", operator(http.HandlerFunc(h.Resume)))
 	mux.Handle("POST /api/clusters/{clusterID}/cronjobs/{ns}/{name}/trigger", operator(triggerLimiter(http.HandlerFunc(h.Trigger))))
 
-	// Observability
-	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /healthz", h.Healthz)
-	mux.HandleFunc("GET /readyz", h.Readyz)
-
 	// UI — HTML pages
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/{name}/runs/more", h.RunsListMore)
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}/{name}/runs/{id}", h.RunDetail)
@@ -99,24 +178,31 @@ func (s *Server) Start(port int) error {
 	mux.HandleFunc("GET /clusters/{clusterID}/cronjobs/{ns}", h.NamespaceDetail)
 	mux.HandleFunc("GET /clusters/{clusterID}", h.ClusterDetail)
 	mux.HandleFunc("GET /", h.Dashboard)
+}
 
-	// Build middleware chain; prepend OIDC middleware if enabled.
+// middlewares builds the chain for the configured mode.
+//
+// The browser-shaped middleware — the OIDC redirect flow and the double-submit
+// CSRF cookie — is installed only in UI mode. Both defend a browser against
+// itself: OIDC's guard answers an unauthenticated request with a 302 to an
+// identity provider, which a machine client cannot follow, and CSRF defends
+// against a cookie the collector never sets. In server mode the front door is
+// the bearer token instead, and there are no POST routes for CSRF to protect.
+func (s *Server) middlewares() []func(http.Handler) http.Handler {
+	if !s.info.Mode.ServesUI() {
+		chain := []func(http.Handler) http.Handler{Logger, Instrument, Recover, SecurityHeaders}
+		if s.apiToken != "" {
+			chain = append([]func(http.Handler) http.Handler{BearerAuth(s.apiToken)}, chain...)
+		}
+		return chain
+	}
+
 	secureCookies := s.authenticator != nil && s.authenticator.Secure()
-	middlewares := []func(http.Handler) http.Handler{Logger, Instrument, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
+	chain := []func(http.Handler) http.Handler{Logger, Instrument, Recover, SecurityHeaders, EnsureCSRFCookie(secureCookies), CSRFProtect}
 	if s.authenticator != nil {
-		middlewares = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, middlewares...)
+		chain = append([]func(http.Handler) http.Handler{s.authenticator.Middleware}, chain...)
 	}
-	handler := Chain(mux, middlewares...)
-
-	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: handler,
-		// No WriteTimeout: SSE streams (/api/runs/{id}/stream) are long-lived.
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
-	return s.httpServer.ListenAndServe()
+	return chain
 }
 
 // Shutdown performs a graceful shutdown of the HTTP server.
@@ -133,4 +219,19 @@ type Handler struct {
 	registry    *cluster.Registry
 	broadcaster *streamer.Broadcaster
 	cacheSynced func() bool
+	info        CollectorInfo
+}
+
+// modeNotFound answers any non-API path in server mode. A collector serves no
+// pages, and saying so is more useful than an empty 404 to whoever opened it in
+// a browser expecting the dashboard.
+func (h *Handler) modeNotFound(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("request for a UI path in server mode", "path", r.URL.Path)
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error":   "this KubeCron runs in server (collector) mode and serves no UI",
+		"mode":    string(h.info.Mode),
+		"api":     "/api/v1/collector",
+		"hint":    "set KUBECRON_MODE=ui to serve the dashboard from this instance",
+		"product": "kubecron",
+	})
 }

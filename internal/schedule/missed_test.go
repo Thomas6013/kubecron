@@ -109,3 +109,109 @@ func TestIsMissed_HonoursTimeZone(t *testing.T) {
 		t.Error("IsMissed() = true, want false: a run followed the 09:00 Paris tick")
 	}
 }
+
+// --- BUG-22 regressions ------------------------------------------------------
+
+// TestPrevRun_SparseSchedules is the bug in one table.
+//
+// PrevRun used to scan back a fixed 25 hours, so anything sparser than daily had
+// no occurrence in the window most of the time and returned an error. IsMissed
+// read that as "cannot say" and answered false, which switched missed detection
+// off for the weekly and monthly jobs — the ones where a missed run matters most.
+func TestPrevRun_SparseSchedules(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 34, 0, 0, time.UTC) // a Friday
+
+	cases := []struct {
+		name, expr string
+		want       time.Time
+	}{
+		{"weekly on Sunday", "0 0 * * 0", time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)},
+		{"monthly on the 1st", "0 0 1 * *", time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)},
+		{"quarterly", "0 0 1 1,4,7,10 *", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+		{"yearly", "@yearly", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+		// The dense ones must keep working, and cheaply.
+		{"per minute", "* * * * *", time.Date(2026, 8, 21, 12, 34, 0, 0, time.UTC)},
+		{"hourly", "0 * * * *", time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := schedule.PrevRun(tc.expr, "", now)
+			if err != nil {
+				t.Fatalf("PrevRun(%q): %v", tc.expr, err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("PrevRun(%q) = %s, want %s", tc.expr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsMissed_SparseSchedulesAreJudged. Before BUG-22 both halves of this
+// answered false — a healthy monthly job and one that had not fired in seventy
+// days were indistinguishable, so nothing ever looked wrong.
+func TestIsMissed_SparseSchedulesAreJudged(t *testing.T) {
+	now := time.Date(2026, 8, 21, 12, 30, 0, 0, time.UTC)
+
+	cases := []struct {
+		name, expr string
+		lastAgo    time.Duration
+		want       bool
+	}{
+		{"monthly, fired on the 1st", "0 0 1 * *", -20 * 24 * time.Hour, false},
+		{"monthly, silent since June", "0 0 1 * *", -70 * 24 * time.Hour, true},
+		{"weekly, fired on Sunday", "0 0 * * 0", -5 * 24 * time.Hour, false},
+		{"weekly, silent for 20 days", "0 0 * * 0", -20 * 24 * time.Hour, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			last := &schedule.LastRun{StartedAt: now.Add(tc.lastAgo)}
+			if got := schedule.IsMissed(tc.expr, "", false, last, now); got != tc.want {
+				t.Errorf("IsMissed() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsMissed_OnTheHourStillJudgesADeadJob is the second half of BUG-22.
+//
+// The most recent due time is zero seconds old when the question is asked
+// exactly on the hour, so it cannot be judged — and returning false there meant
+// a job silent for a day reported healthy purely because of when it was asked.
+// A per-minute CronJob is inside the grace period of *some* occurrence at every
+// instant, so for those the old code could never report a miss at all.
+func TestIsMissed_OnTheHourStillJudgesADeadJob(t *testing.T) {
+	onTheHour := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	dead := &schedule.LastRun{StartedAt: onTheHour.Add(-25 * time.Hour)}
+	if !schedule.IsMissed("0 * * * *", "", false, dead, onTheHour) {
+		t.Error("IsMissed() = false for a job silent for 25h, asked on the hour; want true")
+	}
+	fresh := &schedule.LastRun{StartedAt: onTheHour.Add(-time.Minute)}
+	if schedule.IsMissed("0 * * * *", "", false, fresh, onTheHour) {
+		t.Error("IsMissed() = true for a job that ran a minute ago; want false")
+	}
+
+	// A per-minute schedule: every instant is inside some occurrence's grace
+	// period, which is what made this invisible.
+	perMinute := time.Date(2026, 8, 21, 12, 0, 10, 0, time.UTC)
+	deadMinutes := &schedule.LastRun{StartedAt: perMinute.Add(-3 * time.Hour)}
+	if !schedule.IsMissed("* * * * *", "", false, deadMinutes, perMinute) {
+		t.Error("IsMissed() = false for a per-minute job silent for 3h; want true")
+	}
+}
+
+// TestIsMissed_ANewCronJobIsNotMissed guards the fix's own failure mode. The
+// step-back must not reach an occurrence from before the CronJob existed: with
+// no run ever recorded there is no evidence either way, and a CronJob created
+// three minutes ago has missed nothing.
+func TestIsMissed_ANewCronJobIsNotMissed(t *testing.T) {
+	due := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	if schedule.IsMissed("0 * * * *", "", false, nil, due.Add(2*time.Minute)) {
+		t.Error("IsMissed() = true two minutes after a tick with no run ever recorded; a CronJob created moments ago has missed nothing")
+	}
+	// Past the grace period the same state is a genuine miss.
+	if !schedule.IsMissed("0 * * * *", "", false, nil, due.Add(schedule.MissedGracePeriod+time.Minute)) {
+		t.Error("IsMissed() = false past the grace period with no run ever recorded; want true")
+	}
+}

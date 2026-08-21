@@ -434,20 +434,32 @@ func (s *SQLiteStore) CountRunningRuns(ctx context.Context) (map[string]int, err
 	return out, wrapErr("CountRunningRuns rows", rows.Err())
 }
 
-func (s *SQLiteStore) ListJobRunsPaged(ctx context.Context, cronjobID, beforeCursor string, limit int) ([]JobRun, error) {
+// ListJobRunsPaged returns one page of runs, newest first. A zero `before`
+// starts at the newest run; otherwise only runs strictly older than it are
+// returned.
+//
+// The comparison is a plain TEXT comparison, deliberately: the driver stores a
+// time.Time as Go's own time.Time.String() layout ("2006-01-02 15:04:05.999999999
+// -0700 MST"), which is not ISO 8601 — SQLite's datetime() returns NULL for it,
+// so the datetime(started_at) < datetime(?) this query used to run was NULL for
+// every row and every cursored page came back empty. Passing `before` as a
+// time.Time makes the driver serialise it in exactly the layout the column
+// holds, and that layout orders lexicographically, which is the same property
+// the ORDER BY on this column already depends on.
+func (s *SQLiteStore) ListJobRunsPaged(ctx context.Context, cronjobID string, before time.Time, limit int) ([]JobRun, error) {
 	var (
 		r   *sql.Rows
 		err error
 	)
-	if beforeCursor == "" {
+	if before.IsZero() {
 		r, err = s.db.QueryContext(ctx,
 			`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? ORDER BY started_at DESC LIMIT ?`,
 			cronjobID, limit,
 		)
 	} else {
 		r, err = s.db.QueryContext(ctx,
-			`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? AND datetime(started_at) < datetime(?) ORDER BY started_at DESC LIMIT ?`,
-			cronjobID, beforeCursor, limit,
+			`SELECT `+jobRunCols+` FROM job_runs WHERE cronjob_id = ? AND started_at < ? ORDER BY started_at DESC LIMIT ?`,
+			cronjobID, before, limit,
 		)
 	}
 	if err != nil {

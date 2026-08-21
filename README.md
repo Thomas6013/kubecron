@@ -30,6 +30,48 @@ CronJobs are invisible by default. You define a schedule, deploy it, and hope it
 - **Focus rankings** — every view leads with success rate, failures, in-flight and suspended counts, then ranks CronJobs by most failures, longest mean duration, and highest peak CPU / memory over 24 h, 7 d or 30 d. Fleet-wide when you run several clusters, per-cluster on the cluster view
 - **OIDC authentication** — optional SSO via Keycloak, Dex, Google, or any OIDC provider
 - **Prometheus metrics** — 16 metric families at `/metrics` for Grafana integration, including missed-schedule and in-flight-run gauges. Gauges are re-derived from the database every 30 s, so they keep reporting across a restart instead of going blank until each CronJob next fires
+- **Collector mode** — the same binary, run headless as a per-cluster recorder that serves a read-only versioned API instead of a dashboard. See below
+
+---
+
+## Two ways to run it
+
+KubeCron is one binary with two modes, selected by `KUBECRON_MODE`. Collection is
+identical in both — same informers, same 15-second sampler, same log capture and
+retention. Only the HTTP surface differs, and a release can be switched between
+them without losing its history.
+
+**`ui`** (the default) is everything above: the dashboard, the API behind it, and
+suspend/resume/trigger. Run one, point it at a directory of kubeconfigs, and it
+watches your whole fleet.
+
+**`server`** is a headless collector. It serves only the read-only `/api/v1`
+contract — no HTML, no mutating routes, and the Helm chart grants it no mutating
+RBAC verb, so "read-only" is checkable from outside the process. Deploy one per
+cluster, watching its own cluster through its own ServiceAccount, and read it on
+demand from a console.
+
+That split exists because a recorder and a console want opposite things. A
+recorder has to be running when a job runs: Kubernetes garbage-collects finished
+Jobs after `successfulJobsHistoryLimit` (3 by default), which for a job that runs
+every minute is a **three-minute** window before its duration, exit code and logs
+are gone for good. A console on a laptop that sleeps cannot be that. A Deployment
+in the cluster can.
+
+```bash
+helm install kubecron charts/kubecron -n kubecron --create-namespace \
+  --set mode=server \
+  --set clusterID=prod-eu \
+  --set api.token="$(openssl rand -hex 32)"
+```
+
+Credentials stop travelling — no kubeconfig Secret, RBAC is read-only — and the
+Service stays `ClusterIP`, reached by port-forward, so it needs no Ingress and no
+certificate. The chart labels it `kubecron.io/collector=true` so a console can
+find it instead of being configured with a URL per cluster.
+
+Full wire contract: **[docs/COLLECTOR-API.md](docs/COLLECTOR-API.md)** — with an
+OpenAPI 3.1 spec at **[docs/openapi.yaml](docs/openapi.yaml)**.
 
 ---
 
@@ -129,6 +171,9 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
+| `KUBECRON_MODE` | `ui` | `ui` serves the dashboard and controls; `server` serves only the read-only `/api/v1` collector API. Aliases: `standalone`, `collector` |
+| `API_TOKEN` | _(empty)_ | Bearer token required on every request in `server` mode, except `/healthz` and `/readyz`. Empty = anonymous |
+| `CLUSTER_ID` | `local` | Name this cluster reports as when it watches itself through its own ServiceAccount. Stored rows key off it — changing it on a populated database orphans that history |
 | `KUBECONFIG_DIR` | `/etc/kubecron/kubeconfigs` | Directory with one kubeconfig file per cluster |
 | `DB_PATH` | `/data/kubecron.db` | SQLite database file path |
 | `PORT` | `8080` | HTTP listen port |
@@ -169,7 +214,9 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 
 ## Security
 
-- **Minimal RBAC** — the ClusterRole grants only `get`/`list`/`watch` on CronJobs, Jobs, and Pods, plus `patch` on CronJobs and `create` on Jobs (for suspend/resume/trigger). No access to Secrets.
+- **Minimal RBAC** — the ClusterRole grants only `get`/`list`/`watch` on CronJobs, Jobs, and Pods, plus `patch` on CronJobs and `create` on Jobs (for suspend/resume/trigger). No access to Secrets. In `mode: server` the mutating verbs are not granted at all.
+- **Collector mode is read-only structurally** — it registers no mutating route and holds no mutating RBAC verb, so the claim does not rest on configuration being right. Its front door is `API_TOKEN` (bearer) rather than OIDC, because a program cannot complete a browser redirect flow.
+- **The chart refuses an unauthenticated public install** — `ingress.enabled=true`, or any `service.type` other than `ClusterIP`, fails the install unless a front door is configured for the mode in use (`oidc.enabled` in `ui`, `api.token` in `server`) or `security.acknowledgeInsecureExposure=true` states the decision deliberately.
 - **Distroless runtime image** — `gcr.io/distroless/static:nonroot`, no shell, no package manager.
 - **OIDC authentication** — when enabled, all routes require a valid session. The session key is never logged.
 - **Authorization** — optionally restrict login to an email allow-list (`OIDC_ALLOWED_EMAILS`) and limit mutating actions (suspend/resume/trigger) to operators (`OIDC_OPERATOR_EMAILS`); everyone else is read-only.
@@ -179,6 +226,31 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 ---
 
 ## API
+
+### `/api/v1` — the collector contract
+
+Read-only, versioned, and served in **both** modes, so a console can read a
+KubeCron you already run rather than needing a second one. This is the only part
+of the HTTP surface another program should depend on — full documentation and
+compatibility rules in **[docs/COLLECTOR-API.md](docs/COLLECTOR-API.md)**, with an
+OpenAPI 3.1 spec at **[docs/openapi.yaml](docs/openapi.yaml)** to generate a client from.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/collector` | Discovery: version, capabilities, retention, clusters. Call this first |
+| `GET` | `/api/v1/clusters` | Clusters this collector observes, and since when |
+| `GET` | `/api/v1/clusters/{id}/cronjobs` | CronJobs with next run, missed state, last run, 7-day stats |
+| `GET` | `/api/v1/clusters/{id}/cronjobs/{ns}/{name}/runs` | Run history, paged (`limit`, `before`) |
+| `GET` | `/api/v1/clusters/{id}/cronjobs/{ns}/{name}/daily` | Per-day aggregates for a heatmap (`days`) |
+| `GET` | `/api/v1/runs/{id}` | One run, with its CronJob's identity |
+| `GET` | `/api/v1/runs/{id}/samples` | Resource sample series + the run's computed summary |
+| `GET` | `/api/v1/runs/{id}/logs` | Captured log body (JSON, `limit` for the tail) |
+| `GET` | `/api/v1/runs/{id}/logs.txt` | The same body as plain text |
+| `GET` | `/api/v1/runs/{id}/stream` | SSE stream of a run still in flight |
+
+### `/api` — the dashboard's own API (`ui` mode only)
+
+Unversioned: it backs the HTMX fragments and changes with them.
 
 | Method | Path | Description |
 |---|---|---|
@@ -191,9 +263,14 @@ KubeCron is a **single binary**. It connects directly to each Kubernetes cluster
 | `GET` | `/api/runs/{id}/stream` | SSE stream of live log lines |
 | `GET` | `/api/runs/{id}/resources` | Resource sample time-series |
 | `GET` | `/api/runs/{id}/logs.txt` | Plain-text log download |
-| `GET` | `/metrics` | Prometheus metrics |
-| `GET` | `/healthz` | Health check (always 200) |
-| `GET` | `/readyz` | Readiness (200 when informer caches synced) |
+
+### Both modes
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/metrics` | Prometheus metrics (behind `API_TOKEN` in `server` mode) |
+| `GET` | `/healthz` | Health check (always 200, never authenticated) |
+| `GET` | `/readyz` | Readiness (200 when informer caches synced, never authenticated) |
 
 ---
 
