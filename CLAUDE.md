@@ -22,7 +22,7 @@ Collection is identical in both modes — same informers, sampler, log capture, 
 - **Frontend**: HTMX 2.x (CDN) + custom CSS (`internal/ui/static/app.css`, embedded) + Chart.js (CDN) — no Node.js build step
 - **Auth**: OIDC optional (`coreos/go-oidc/v3` + `golang.org/x/oauth2`); HMAC-signed session cookie, 24 h TTL
 - **Metrics**: Prometheus via `prometheus/client_golang`; 16 wired metric families exposed at `/metrics`. Gauges are re-derived from the DB by `metrics.StateCollector` every 30 s so they survive a restart; counters/histograms stay event-driven
-- **Infra**: Two-stage Dockerfile (`golang:1.26-alpine` build → `gcr.io/distroless/static:nonroot`), CI with golangci-lint + SBOM + cosign; images currently `linux/amd64` only (arm64 planned — AUDIT INFRA-3)
+- **Infra**: Two-stage Dockerfile (`golang:1.27-alpine` build → `gcr.io/distroless/static:nonroot`), CI with golangci-lint + SBOM + cosign; images currently `linux/amd64` only (arm64 planned — AUDIT INFRA-3)
 
 ---
 
@@ -194,7 +194,7 @@ Full detail, evidence, and history: `docs/AUDIT.md` (IDs below reference it).
 
 ### Infra & CI — Medium Priority
 
-- **SUP-1** — no CVE gate in CI. `govulncheck ./...` reports 14 reachable stdlib advisories at the `go 1.26.0` floor; the release image escapes them only because `golang:1.26-alpine` floats. Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` **before** pinning digests (INFRA-1).
+- **SUP-1** — no CVE gate in CI. `govulncheck ./...` reported 14 reachable stdlib advisories at the `go 1.26.0` floor; the release image escaped them only because the base tag floats. The build now uses `golang:1.27-alpine` (CI and Dockerfile, 2026-08-21), but **`go.mod` still declares `go 1.26.0`**, so the floor — and what govulncheck measures against — is unchanged. Add `govulncheck` to `ci.yml` and an image scan to `docker-publish.yml` **before** pinning digests (INFRA-1).
 - **INFRA-3** — release images are `linux/amd64` only; the arm64 claim is not implemented in `docker-publish.yml` (no QEMU step). Implement or drop the claim.
 - **INFRA-5** — CI is skipped entirely for `renovate[bot]`; Renovate already has nine open branches, so its PRs would merge untested.
 
