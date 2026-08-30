@@ -122,6 +122,27 @@ configured. Callers use emptiness as the test for "is a front door configured".
 {{- end }}
 
 {{/*
+Whether /api/v1 can actually be reached by a program, which is the only honest
+condition for advertising this Service to a console.
+
+Not the same question as the mode. A `server` release always qualifies: it has
+no browser flow at all. A `ui` release qualifies only when something a program
+can present will open the door — an API token, or no OIDC at all. A `ui` release
+with OIDC and no token answers every API request with a redirect to an identity
+provider, so labelling it discoverable would advertise a door that cannot be
+opened, and a console would report a collector it can never read.
+*/}}
+{{- define "kubecron.programReadable" -}}
+{{- if eq (include "kubecron.mode" .) "server" -}}
+true
+{{- else if ne (include "kubecron.apiTokenSecretName" .) "" -}}
+true
+{{- else if not .Values.oidc.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
 Name of the PVC.
 */}}
 {{- define "kubecron.pvcName" -}}

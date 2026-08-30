@@ -46,13 +46,18 @@ oidc:
   allowedEmails: ""    # who may log in at all
   operatorEmails: ""   # who may suspend/resume/trigger; others are read-only
 
-# The collector API's front door (mode: server only).
+# The collector API's front door.
 #
 # OIDC is a browser redirect flow and a program cannot complete it, so a
 # collector is guarded by a shared bearer token instead. Leaving it empty means
 # every /api/v1 route and /metrics answer anonymously — which discloses the
 # whole CronJob inventory, run outcomes and captured log bodies, though it can
 # never mutate anything.
+# In mode: ui it matters just as much, and for the opposite reason: OIDC answers
+# an unauthenticated request with a redirect to an identity provider, which a
+# console cannot follow. Set a token and /api/v1 is guarded by it while the
+# dashboard keeps OIDC — two doors, each for the client that can open it.
+# Without one, /api/v1 stays behind the session guard and no program can read it.
 api:
   # Name of an existing Secret with an `api-token` key. Takes precedence over
   # `token` below.

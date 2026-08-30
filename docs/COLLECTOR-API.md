@@ -24,9 +24,15 @@ KubeCron is one binary that runs one of two ways. `KUBECRON_MODE` selects which
 | `/api/v1/*` collector contract | yes | yes |
 | Suspend / resume / trigger | yes | **no route registered** |
 | RBAC granted by the chart | `patch` on cronjobs, `create` on jobs | `get`/`list`/`watch` only |
-| Front door | OIDC (optional) | `API_TOKEN` bearer (optional) |
+| Front door | OIDC for the dashboard; `API_TOKEN` for `/api/v1` when set | `API_TOKEN` bearer (optional) |
 | `/metrics` | open | behind the token |
 | Informers, sampler, log capture, retention | identical | identical |
+
+**A `ui`-mode instance needs `API_TOKEN` to be readable by a program.** With
+OIDC on and no token, `/api/v1` sits behind the session guard and every request
+to it is answered with a redirect to the identity provider — which a console
+cannot follow, from an Ingress or from a port-forward alike. Set a token and the
+contract is guarded by it while the dashboard keeps OIDC.
 
 The collection machinery is the same in both, which is why this is a flag and
 not a build tag: a collector that recorded a different set of facts from the
@@ -79,9 +85,27 @@ be configured with a URL per cluster:
 | annotation `kubecron.io/api-version` | `v1` |
 | annotation `kubecron.io/api-path` | `/api/v1` |
 | annotation `kubecron.io/auth` | `bearer` or `none` |
+| annotation `kubecron.io/auth-secret` | the Secret holding the token (when `bearer`) |
+| annotation `kubecron.io/auth-secret-key` | its key, `api-token` |
 
 A cluster with no such Service has no collector, which is a rung of the ladder,
 not an error. Set `service.discoverable=false` to opt out.
+
+**The Service is only labelled when a program can actually read the API** — a
+`server` release always, a `ui` release when it has an API token or no OIDC. A
+`ui` release with OIDC and no token answers every API request with a redirect to
+an identity provider, so advertising it would have a console report a collector
+it can never read.
+
+**The token does not have to be configured into the console.** The last two
+annotations name the Secret and key that hold it, so a console holding the
+operator's kubeconfig reads it from the cluster and nothing is typed anywhere.
+That is not a weakening: reading one Secret is strictly less than what that
+kubeconfig already grants, and the token was never a barrier against the
+operator — it is a barrier against whoever can reach the Service with no cluster
+credential at all. A console that cannot read the Secret should say so ("a
+collector is here, but I have no token for it") and fall back to the rung
+beneath, rather than showing an empty panel.
 
 ### Authentication
 
